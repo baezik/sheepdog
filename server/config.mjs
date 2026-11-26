@@ -37,6 +37,7 @@ export const DEFAULTS = {
   slack: {
     token: '',
     team: '',
+    teamId: '',
     teamUrl: '',
     user: '',
     userId: '',

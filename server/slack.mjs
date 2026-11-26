@@ -14,6 +14,9 @@
 //  - team bot: one person sets the app up and shares its *Bot User OAuth Token* (xoxb-) with the team;
 //    the bot is invited to the review channel. A bot token doesn't say who the person is, so they pick
 //    themselves from the channel's members (setMe), which is how "Yours" and PR alerts find their PRs.
+import os from 'node:os';
+import path from 'node:path';
+import { existsSync } from 'node:fs';
 import { getConfig, updateConfig, getState, saveStateSoon } from './config.mjs';
 import { prDetails, github } from './github.mjs';
 import { recordPr } from './history.mjs';
@@ -115,7 +118,7 @@ export async function connect(tok) {
   }
   updateConfig((c) => {
     // a bot token doesn't say who you are: keep a previously known identity (switching from your own token)
-    Object.assign(c.slack, { token: tok, team: me.team, teamUrl: me.url, user: isUser ? name : c.slack.userId ? c.slack.user : '', userId: isUser ? me.user_id : c.slack.userId });
+    Object.assign(c.slack, { token: tok, team: me.team, teamId: me.team_id || '', teamUrl: me.url, user: isUser ? name : c.slack.userId ? c.slack.user : '', userId: isUser ? me.user_id : c.slack.userId });
   });
   return { team: me.team, user: isUser ? name : null, kind: isUser ? 'user' : 'bot' };
 }
@@ -128,7 +131,7 @@ export async function disconnect({ keepIdentity = false } = {}) {
     try { await api('auth.revoke', {}, tok); log('slack: revoked the personal token'); } catch (e) { log('slack: revoke failed:', e.message); }
   }
   updateConfig((c) => {
-    Object.assign(c.slack, { token: '', team: '', teamUrl: '', channelId: '', channelName: '' });
+    Object.assign(c.slack, { token: '', team: '', teamId: '', teamUrl: '', channelId: '', channelName: '' });
     if (!keepIdentity) Object.assign(c.slack, { user: '', userId: '' });
   });
   Object.assign(slack, { ok: false, prs: [], error: null });
@@ -227,10 +230,22 @@ function prUrlsIn(msg) {
 const tsToMs = (ts) => Math.round(Number(ts) * 1000);
 export const emojiList = (v) => String(v || '').split(',').map((x) => x.trim()).filter(Boolean);
 
+// Links to a post open the Slack app directly (slack://…) when it's installed, instead of the web page that
+// asks "Open in Slack?" first. Without the app, or without the team id yet, the web link.
+const SLACK_APP = ['/Applications/Slack.app', path.join(os.homedir(), 'Applications', 'Slack.app')].some((p) => existsSync(p));
+function postLink(s, ts) {
+  if (SLACK_APP && s.teamId) return `slack://channel?team=${s.teamId}&id=${s.channelId}&message=${ts}`;
+  return s.teamUrl ? `${s.teamUrl.replace(/\/$/, '')}/archives/${s.channelId}/p${ts.replace('.', '')}` : null;
+}
+
 export async function refreshSlack() {
   const s = getConfig().slack;
   if (!s.token || !s.channelId) { Object.assign(slack, { ok: false, prs: [], error: s.token ? 'Pick a review channel' : null }); return; }
   try {
+    if (!s.teamId) { // connected before team ids were stored: look it up once
+      const me = await api('auth.test');
+      if (me.team_id) { updateConfig((c) => { c.slack.teamId = me.team_id; }); s.teamId = me.team_id; }
+    }
     const oldest = Date.now() / 1000 - s.lookbackDays * 86400;
     const msgs = [];
     let cursor = '';
@@ -287,7 +302,7 @@ export async function refreshSlack() {
           reviewers: reviewers.map((u) => ({ id: u, since: since(u, 'r'), est: !!guess[`${m.ts}:r:${u}`] })),
           approvers: approvers.map((u) => ({ id: u, since: since(u, 'a'), est: !!guess[`${m.ts}:a:${u}`] })),
           replies: m.reply_count || 0,
-          link: s.teamUrl ? `${s.teamUrl.replace(/\/$/, '')}/archives/${s.channelId}/p${m.ts.replace('.', '')}` : null,
+          link: postLink(s, m.ts),
         });
       }
     }
