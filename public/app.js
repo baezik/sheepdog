@@ -49,9 +49,9 @@ function clock(ms) {
 // ---------------------------------------------------------------- app state
 let S = null;            // /api/state
 let cfg = null;          // /api/config (secrets redacted)
-const UI = { prFilter: 'all', pane: 'pastures', hostTest: {}, sshHosts: null, newHost: '' };
+const UI = { prFilter: 'all', pane: 'pastures', hostTest: {}, sshHosts: null, newHost: '', statsDays: 7, stats: null, statsAt: 0, statsErr: '' };
 const GH = { status: null, busy: '', err: '', device: null, suggestions: null, query: '' };
-const SL = { status: null, busy: '', err: '', channels: null, query: '' };
+const SL = { status: null, busy: '', err: '', channels: null, query: '', members: null, meQuery: '' };
 const WZ = { step: 0, detect: null, selected: null, results: {} };
 
 async function loadConfig() { cfg = await api('/api/config'); }
@@ -180,6 +180,28 @@ function alertOn(agents) {
   }
 }
 
+// PR alerts come from the server (review started, approved, no reviewer for hours); show the ones not seen yet
+let lastPrEvent = null;
+function prAlerts(events) {
+  if (!events) return;
+  const newest = events.length ? events.at(-1).id : 0;
+  if (lastPrEvent === null) { lastPrEvent = newest; return; } // don't replay what happened before the page opened
+  const fresh = events.filter((e) => e.id > lastPrEvent);
+  if (!fresh.length) return;
+  lastPrEvent = newest;
+  const al = S.settings.alerts;
+  if (inQuietHours(al.quietHours)) return;
+  if (al.sound !== 'Silent') window.SheepdogSounds.play('Ding');
+  if (!al.notify) return;
+  for (const e of fresh.slice(-3)) {
+    if (NATIVE) native({ type: 'notify', title: e.title, body: e.body, id: `pr-${e.id}`, focusKey: '', url: e.url });
+    else if ('Notification' in window && Notification.permission === 'granted') {
+      const n = new Notification(e.title, { body: e.body, tag: `pr-${e.id}` });
+      n.onclick = () => { window.open(e.url, '_blank', 'noopener'); n.close(); };
+    }
+  }
+}
+
 async function focusAgent(key) {
   try {
     const r = await api('/api/focus', { key });
@@ -262,6 +284,106 @@ function renderBranches() {
   grid.innerHTML = html;
 }
 
+// ---------------------------------------------------------------- statistics
+const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+function hrs(sec) {
+  if (sec == null) return '—';
+  if (sec < 60) return `${Math.round(sec)}s`;
+  if (sec < 3600) return `${Math.round(sec / 60)}m`;
+  const h = sec / 3600;
+  return h < 10 ? `${h.toFixed(1).replace(/\.0$/, '')}h` : `${Math.round(h)}h`;
+}
+const tile = (label, value, sub) => `<div class="tile"><div class="tl">${label}</div><div class="tv">${value}</div>${sub ? `<div class="ts">${sub}</div>` : ''}</div>`;
+
+async function loadStats(force) {
+  if (!force && UI.stats?.days === UI.statsDays && Date.now() - UI.statsAt < 60e3) return renderStats();
+  try { UI.stats = await api(`/api/stats?days=${UI.statsDays}`); UI.statsAt = Date.now(); UI.statsErr = ''; }
+  catch (e) { UI.statsErr = e.message; }
+  renderStats();
+}
+
+function barChart(d) {
+  const today = d.days === 1;
+  const max = Math.max(3600, ...d.series.map((b) => b.work));
+  const now = Date.now();
+  const cols = d.series.map((b, i) => {
+    const date = new Date(b.at);
+    const when = today ? `${String(date.getHours()).padStart(2, '0')}:00` : date.toLocaleDateString([], { weekday: 'short', day: 'numeric', month: 'short' });
+    const future = b.at > now;
+    const tip = future ? '' : `${when} · ${hrs(b.work)} working · ${hrs(b.wait)} waiting on you${b.tokens ? ` · ${fmtTokens(b.tokens)} tokens` : ''}`;
+    const lbl = today ? (i % 6 === 0 ? String(i).padStart(2, '0') : '') : d.days === 7 ? WEEKDAYS[(date.getDay() + 6) % 7] : (i % 5 === 0 || i === d.series.length - 1 ? String(date.getDate()) : '');
+    return { bar: `<div class="col ${future ? 'future' : ''}" ${tip ? `data-tip="${esc(tip)}"` : ''}><i style="height:${b.work ? Math.max(2, (100 * b.work) / max) : 0}%"></i></div>`, lbl: `<span>${lbl}</span>` };
+  });
+  return `<div class="chart"><div class="yax"><span>${hrs(max)}</span><span>0</span></div>
+    <div class="plot"><div class="bars" style="grid-template-columns:repeat(${cols.length},1fr)">${cols.map((c) => c.bar).join('')}</div>
+    <div class="xax" style="grid-template-columns:repeat(${cols.length},1fr)">${cols.map((c) => c.lbl).join('')}</div></div></div>`;
+}
+
+function heatmap(d) {
+  const max = Math.max(...d.heat.flat());
+  if (!max) return '';
+  const cells = d.heat.map((row, wd) => `<span class="hl">${WEEKDAYS[wd]}</span>${row.map((v, h) => {
+    const lvl = v ? Math.min(5, Math.ceil((5 * v) / max)) : 0;
+    return `<i class="l${lvl}" data-tip="${WEEKDAYS[wd]} ${String(h).padStart(2, '0')}:00 · ${v ? `${hrs(v)} of agent time` : 'no agent time'}"></i>`;
+  }).join('')}`).join('');
+  const hours = `<span></span>${Array.from({ length: 24 }, (_, h) => `<span class="hh">${h % 6 === 0 ? String(h).padStart(2, '0') : ''}</span>`).join('')}`;
+  return `<div class="st-sec"><div class="st-h">When your agents work</div><div class="heat">${cells}${hours}</div>
+    <div class="heat-key">less <i class="l1"></i><i class="l2"></i><i class="l3"></i><i class="l4"></i><i class="l5"></i> more</div></div>`;
+}
+
+function table(title, rows, cols) {
+  if (!rows.length) return '';
+  return `<div class="st-sec"><div class="st-h">${title}</div><table class="st-t"><thead><tr>${cols.map(([h, , cls]) => `<th class="${cls || ''}">${h}</th>`).join('')}</tr></thead>
+    <tbody>${rows.map((r) => `<tr>${cols.map(([, f, cls]) => `<td class="${cls || ''}">${f(r)}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
+}
+
+function renderStats() {
+  for (const b of $('statsDays').querySelectorAll('button')) b.classList.toggle('on', Number(b.dataset.days) === UI.statsDays);
+  const d = UI.stats;
+  const body = $('statsBody');
+  if (UI.statsErr) { body.innerHTML = `<div class="banner">${esc(UI.statsErr)}</div>`; return; }
+  if (!d || d.days !== UI.statsDays) { body.innerHTML = '<div class="st-empty"><span class="spin"></span> Counting…</div>'; return; }
+  $('statsRange').textContent = d.first ? `since ${clock(Math.max(d.from, d.first))}` : '';
+  if (!d.samples && !d.prs.posted) {
+    body.innerHTML = `<div class="st-empty"><div class="pic">📊</div><b>Nothing recorded yet${d.days === 1 ? ' today' : ''}.</b>
+      <div>Sheepdog keeps a history of what your agents do while it runs, on this computer only. Check back once they’ve done some work.</div></div>`;
+    return;
+  }
+  const r = d.responses, p = d.prs;
+  const avgTok = d.work ? `${fmtTokens(Math.round(d.tokens / (d.work / 3600)))} per agent-hour` : '';
+  let html = `<div class="tiles">
+    ${tile('Agent time', hrs(d.work), `${d.agents} agent${d.agents === 1 ? '' : 's'} · ${hrs(d.wait)} waiting on you`)}
+    ${tile('You answer in', r.median == null ? '—' : hrs(r.median), r.count ? `median of ${r.count} · 90% within ${hrs(r.p90)}` : 'no answers yet')}
+    ${tile('In parallel', d.parallel ? String(d.parallel) : '—', d.peak ? `agents working at once · peak ${d.peak}` : 'agents working at once')}
+    ${tile('Tokens', d.tokens ? fmtTokens(d.tokens) : '—', avgTok)}
+  </div>
+  <div class="st-sec"><div class="st-h">Agent time ${d.days === 1 ? 'per hour' : 'per day'}</div>${barChart(d)}</div>`;
+  if (d.days > 1) html += heatmap(d);
+  const work = (x) => hrs(x.work), tok = (x) => (x.tokens ? fmtTokens(x.tokens) : '—');
+  html += `<div class="st-cols">
+    ${table('By ticket', d.tickets, [['Ticket', (x) => ticketHtml(x.name)], ['Agent time', work, 'n'], ['Tokens', tok, 'n']])}
+    ${table('By repository', d.repos, [['Repository', (x) => esc(x.name)], ['Agent time', work, 'n'], ['Tokens', tok, 'n']])}
+    ${table('By model', d.models, [['Model', (x) => esc(x.name)], ['Agent time', work, 'n'], ['Tokens', tok, 'n']])}
+    ${table('Longest waits', r.longest, [['Agent', (x) => `${x.ticket ? ticketHtml(x.ticket) + ' ' : ''}${esc(x.title || x.repo || (x.kind === 'codex' ? 'Codex' : 'Claude'))}`], ['Waited', (x) => hrs(x.wait), 'n'], ['When', (x) => esc(clock(x.at)), 'n when']])}
+  </div>`;
+  if (r.away) html += `<div class="st-note">Not counted as answers: ${r.away} time${r.away === 1 ? '' : 's'} an agent waited longer than ${S.settings.idleMinutes} min (you were away).</div>`;
+  if (S.slack.connected || p.posted) {
+    html += `<div class="st-sec"><div class="st-h">PR reviews${S.slack.channel ? ` · #${esc(S.slack.channel)}` : ''}</div>`;
+    if (!p.posted) html += '<div class="st-note">No pull requests posted in this period yet.</div>';
+    else html += `<div class="tiles">
+      ${tile('Posted', String(p.posted), p.yours ? `${p.yours} yours` : '')}
+      ${tile('Until someone reviews', p.toReview == null ? '—' : hrs(p.toReview), `median · ${p.reviewed} of ${p.posted} picked up`)}
+      ${tile('Until approved', p.toApprove == null ? '—' : hrs(p.toApprove), `median · ${p.approved} approved`)}
+      ${tile('Your PRs wait', p.yoursToReview == null ? '—' : hrs(p.yoursToReview), 'median until someone reviews')}
+    </div>${table('Reviewers', p.people, [['Name', (x) => esc(x.name)], ['👀 Reviewed', (x) => x.reviewed, 'n'], ['✅ Approved', (x) => x.approved, 'n']])}`;
+    html += '</div>';
+  }
+  html += `<div class="st-note">Counted while Sheepdog runs. Stored on this computer only, for 90 days. <a href="#" data-act="settings" data-pane="advanced">Clear…</a></div>`;
+  const top = body.scrollTop;
+  body.innerHTML = html;
+  body.scrollTop = top;
+}
+
 // ---------------------------------------------------------------- settings building blocks
 const toggle = (key) => `<button class="toggle ${get(cfg, key) ? 'on' : ''}" data-act="toggle" data-key="${key}" aria-pressed="${!!get(cfg, key)}"></button>`;
 const select = (key, opts, type = 'string') => `<select class="field" data-set="${key}" data-type="${type}">${opts.map(([v, l]) =>
@@ -334,6 +456,11 @@ function paneAlerts() {
       row('Sound', '', `${select('alerts.sound', window.SheepdogSounds.names.map((n) => [n, n]))}<button class="btn solid" data-act="play">▶</button>`),
       row('Window flash', 'Board pulses amber twice', toggle('alerts.windowFlash')),
     ])}
+    ${group('Pull requests', [
+      row('Someone starts reviewing your PR', S?.slack?.connected ? '👀 on your post in the review channel' : 'Needs Slack, see Settings › Slack', toggle('alerts.prReview')),
+      row('Your PR is approved', '✅ in Slack or approved on GitHub', toggle('alerts.prApproved')),
+      row('A teammate’s PR has no reviewer', 'Nudge once, after', select('alerts.prNudgeHours', [[0, 'Off'], [2, '2 hours'], [4, '4 hours'], [8, '8 hours'], [24, '1 day']], 'number')),
+    ])}
     ${group('Hold back', [
       row('Only alert after', 'Skip quick back-and-forth', select('alerts.alertAfterSeconds', [[0, 'Right away'], [30, '30 seconds'], [60, '1 minute'], [120, '2 minutes'], [300, '5 minutes']], 'number')),
       row('Quiet hours', `${esc(q.start)} – ${esc(q.end)} · board still updates`, `<input class="field" type="time" data-set="alerts.quietHours.start" value="${esc(q.start)}"><input class="field" type="time" data-set="alerts.quietHours.end" value="${esc(q.end)}">${toggle('alerts.quietHours.enabled')}`),
@@ -378,6 +505,9 @@ function paneAdvanced() {
     ${group('Setup', [
       row('Run setup again', 'Re-detect agents, machines and connections', '<button class="btn primary" data-act="wizard">Run setup…</button>'),
       row('Reset all settings', 'Forgets machines, GitHub and Slack connections', '<button class="btn danger" data-act="reset">Reset…</button>'),
+    ])}
+    ${group('Statistics', [
+      row('Clear statistics', 'Deletes the history behind 📊 Stats (kept 90 days, on this computer only)', '<button class="btn danger" data-act="stats-clear">Clear…</button>'),
     ])}
     <div class="note">Settings and tokens are stored on this computer only, in <code>~/.config/sheepdog/config.json</code>, readable only by your user.</div>`;
 }
@@ -448,32 +578,48 @@ function slackBody(inWizard) {
   const s = SL.status;
   if (!s) return `<div class="note"><span class="spin"></span> Checking Slack…</div>`;
   const err = SL.err ? `<div class="sub err" style="font-size:12px">${esc(SL.err)}</div>` : '';
+  const tokenInput = `<div style="display:flex;gap:6px"><input class="field wide mono" id="slToken" type="password" placeholder="xoxb-… or xoxp-…" autocomplete="off"><button class="btn solid" data-act="sl-token">${busy(SL.busy === 'token', 'Connect')}</button></div>${err}`;
   if (!s.connected) {
-    return `${group('Connect Slack', [`<div class="row col" style="gap:12px">
+    return `${group('Use your team’s Sheepdog bot', [`<div class="row col" style="gap:10px">
+      <div class="wiz-p" style="margin:0">If someone on your team already set Sheepdog up, ask them for the bot token (<code>xoxb-…</code>) and paste it here. Then pick the review channel and yourself.</div>
+      ${tokenInput}
+    </div>`])}
+    ${group('Or set it up for your team', [`<div class="row col" style="gap:12px">
       <ol class="steps">
-        <li><b>Create the Sheepdog app</b> in your workspace. The button opens Slack with everything filled in: pick your workspace, then <b>Create</b>.</li>
-        <li>Click <b>Install to Workspace</b> and <b>Allow</b>.</li>
-        <li>Under <b>OAuth &amp; Permissions</b>, copy the <b>User OAuth Token</b> (starts with <code>xoxp-</code>) and paste it here.</li>
+        <li><a href="${esc(s.manifestUrlBot)}" target="_blank" rel="noopener"><b>Create the Sheepdog bot</b> ↗</a>: Slack opens with everything filled in. Pick your workspace, then <b>Create</b>.</li>
+        <li>Click <b>Install to Workspace</b> and <b>Allow</b>. (Admins may need to approve it.)</li>
+        <li>In the review channel, type <code>/invite @Sheepdog</code>.</li>
+        <li>Under <b>OAuth &amp; Permissions</b>, copy the <b>Bot User OAuth Token</b> (<code>xoxb-…</code>), paste it above, and share it with your team through a password manager.</li>
       </ol>
-      <div><a class="btn primary" href="${esc(s.manifestUrl)}" target="_blank" rel="noopener">Create Slack app ↗</a></div>
-      <div style="display:flex;gap:6px"><input class="field wide mono" id="slToken" type="password" placeholder="xoxp-…" autocomplete="off"><button class="btn solid" data-act="sl-token">${busy(SL.busy === 'token', 'Connect')}</button></div>
-      ${err}
-      <div class="note">Sheepdog only reads messages and reactions in the one channel you pick, and member names. The token stays on this computer. Workspace admins may need to approve new apps.</div>
+      <div class="note">The bot only reads messages and reactions in channels it’s invited to, and sees channel and member names like any workspace member. Nothing is posted, and the token stays on each computer.
+        Prefer not to invite a bot? <a href="${esc(s.manifestUrl)}" target="_blank" rel="noopener">Create a personal app</a> instead and paste its User OAuth Token (<code>xoxp-…</code>): it reads with your own access.</div>
     </div>`])}`;
   }
   const chan = s.channelId ? `#${esc(s.channelName)}` : 'None picked';
   const chanSub = !s.channelId ? 'Pick the channel where your team posts pull requests' : s.error ? `<span class="err">${esc(s.error)}</span>` : `${s.prCount} open PR${s.prCount === 1 ? '' : 's'} found`;
+  const kindSub = s.kind === 'user' ? `Your personal token · connected as ${esc(s.user)}` : `Team bot token${s.user ? ` · you are ${esc(s.user)}` : ''} · the bot must be in the review channel`;
   return `${group('Workspace', [`<div class="row"><span class="dot"></span><div class="lbl"><div><b>${esc(s.team)}</b></div>
-      <div class="sub">${s.kind === 'user' ? `Connected as ${esc(s.user)}` : 'Bot token: invite @Sheepdog to the review channel'}</div></div>
-      <div class="ctl"><button class="btn solid" data-act="sl-disconnect">Disconnect</button></div></div>`])}
+      <div class="sub">${kindSub}</div></div>
+      <div class="ctl"><button class="btn solid" data-act="sl-disconnect">Disconnect</button></div></div>`,
+      ...(s.kind === 'user' && !inWizard ? [`<div class="row col" style="gap:8px"><div class="lbl"><div>Switch to your team’s bot token</div>
+        <div class="sub">Reads only the channels the bot is invited to. Your personal token is revoked in Slack once the bot token works.</div></div>${tokenInput}</div>`] : [])])}
+    ${s.kind === 'bot' ? group('You', [row(s.userId ? `You are <b>${esc(s.user || s.userId)}</b>` : 'Who are you?',
+        'A bot token doesn’t say who you are. Pick yourself so “Yours” and PR alerts find your PRs (with GitHub connected, PRs you author are found either way).', ''),
+      `<div class="row col"><input class="field wide" id="slMe" data-search="slme" placeholder="Search the review channel’s members" value="${esc(SL.meQuery)}" autocomplete="off"></div>
+      <div class="suggest" id="slMeSuggest">${slMeHtml()}</div>`]) : ''}
     ${group('Review channel', [row(chan, chanSub, ''), `<div class="row col"><input class="field wide" id="slChan" data-search="sl" placeholder="Search channels" value="${esc(SL.query)}" autocomplete="off">${err}</div>
       <div class="suggest" id="slSuggest">${slSuggestHtml()}</div>`])}
     ${inWizard ? '' : group('Reactions', [
       row('Reviewing', 'Someone has started reviewing (emoji name)', field('slack.reviewing', 'eyes', 'class="field mono" style="width:170px"')),
       row('Approved', 'Removes the PR from the sidebar (emoji name)', field('slack.approved', 'white_check_mark', 'class="field mono" style="width:170px"')),
     ])}
-    ${s.kind === 'bot' ? group('You', [row('Your Slack member ID', 'So Sheepdog knows which PRs are yours: Slack profile › ⋮ › Copy member ID', field('slack.userId', 'U0123ABCD', 'class="field mono" style="width:140px"'))]) : ''}
     ${inWizard ? '' : group('History', [row('Look back', 'Older posts leave the sidebar', select('slack.lookbackDays', [[3, '3 days'], [7, '1 week'], [14, '2 weeks'], [30, '30 days']], 'number'))])}`;
+}
+function slMeHtml() {
+  const list = SL.members;
+  if (!list) return '';
+  if (!list.length) return `<div class="note" style="padding:8px 12px">No one matches.</div>`;
+  return list.map((u) => `<button data-act="sl-me" data-id="${esc(u.id)}">${esc(u.name)}<span class="meta2">${u.real && u.real !== u.name ? esc(u.real) : ''}</span></button>`).join('');
 }
 function slSuggestHtml() {
   const list = SL.channels;
@@ -630,7 +776,7 @@ function rerender() {
     if (keep && $(keep.id)) { const el = $(keep.id); el.value = keep.v; el.focus(); }
   }
 }
-function closeAll() { for (const id of ['branchesScrim', 'settingsScrim', 'wizardScrim']) $(id).hidden = true; }
+function closeAll() { for (const id of ['branchesScrim', 'statsScrim', 'settingsScrim', 'wizardScrim']) $(id).hidden = true; $('tip').hidden = true; }
 
 // ---------------------------------------------------------------- actions
 const actions = {
@@ -638,6 +784,12 @@ const actions = {
   pane: (el) => { openPane(el.dataset.pane); renderSettings(); },
   close: () => { closeAll(); if (WZ.step !== undefined && !cfg?.setupComplete) setConfig({ setupComplete: true }); },
   branches: () => { closeAll(); $('branchesScrim').hidden = false; renderBranches(); },
+  stats: () => { closeAll(); $('statsScrim').hidden = false; loadStats(); },
+  'stats-days': (el) => { UI.statsDays = Number(el.dataset.days); loadStats(); },
+  'stats-clear': async () => {
+    if (!confirm('Delete all Sheepdog statistics? This can’t be undone.')) return;
+    try { await api('/api/stats/clear', {}); UI.stats = null; UI.statsAt = 0; toast('Statistics cleared'); } catch (e) { toast(e.message, true); }
+  },
   wizard: () => openWizard(),
   focus: (el) => {
     if (el.dataset.ok !== '1' || !el.dataset.key) { toast('No terminal tab found for this agent', true); return; }
@@ -755,15 +907,22 @@ const actions = {
     SL.busy = 'token'; SL.err = ''; rerender();
     try {
       const r = await api('/api/slack/token', { token });
-      toast(`Connected to ${r.team}`);
+      toast(r.kind === 'bot' ? `Connected to ${r.team} with the team bot` : `Connected to ${r.team}`);
       await loadSl();
       searchChannels('');
+      if (r.kind === 'bot' && !SL.status?.userId) searchMembers('');
     } catch (e) { SL.err = e.message; }
     SL.busy = ''; rerender();
   },
   'sl-disconnect': async () => {
-    if (!confirm('Disconnect Slack?')) return;
+    const personal = SL.status?.kind === 'user';
+    if (!confirm(personal ? 'Disconnect Slack? Your personal Slack token is also revoked in Slack, so it stops working everywhere.' : 'Disconnect Slack? (The team’s bot token keeps working for everyone else.)')) return;
     await api('/api/slack/disconnect', {}); SL.channels = null; loadSl(); poll(true);
+  },
+  'sl-me': async (el) => {
+    try { const me = await api('/api/slack/me', { id: el.dataset.id }); toast(`Got it, you’re ${me.name}`); SL.members = null; SL.meQuery = ''; }
+    catch (e) { toast(e.message, true); }
+    await loadSl(); poll(true);
   },
   'sl-channel': async (el) => {
     SL.err = '';
@@ -826,6 +985,11 @@ async function searchRepos(q) {
   try { GH.suggestions = await api(`/api/github/repos?q=${encodeURIComponent(q)}`); } catch { GH.suggestions = null; }
   const box = $('ghSuggest'); if (box) box.innerHTML = ghSuggestHtml();
 }
+async function searchMembers(q) {
+  SL.meQuery = q;
+  try { SL.members = await api(`/api/slack/members?q=${encodeURIComponent(q)}`); } catch (e) { SL.members = null; toast(e.message, true); }
+  const box = $('slMeSuggest'); if (box) box.innerHTML = slMeHtml();
+}
 async function searchChannels(q) {
   SL.query = q;
   try { SL.channels = await api(`/api/slack/channels?q=${encodeURIComponent(q)}`); SL.err = ''; } catch (e) { SL.channels = null; SL.err = e.message; }
@@ -845,6 +1009,17 @@ document.addEventListener('click', (e) => {
   }
   if (e.target.classList.contains('scrim') && e.target.id !== 'wizardScrim') closeAll();
 });
+// hover tooltips for chart marks
+document.addEventListener('mouseover', (e) => {
+  const el = e.target.closest?.('[data-tip]');
+  const tip = $('tip');
+  if (!el) { tip.hidden = true; return; }
+  tip.textContent = el.dataset.tip;
+  tip.hidden = false;
+  const r = el.getBoundingClientRect(), w = tip.offsetWidth, h = tip.offsetHeight;
+  tip.style.left = `${Math.max(8, Math.min(innerWidth - w - 8, r.left + r.width / 2 - w / 2))}px`;
+  tip.style.top = `${r.top - h - 8 < 8 ? r.bottom + 8 : r.top - h - 8}px`;
+});
 document.addEventListener('change', (e) => {
   const el = e.target;
   if (el.id === 'newHostPick' && el.value) { UI.newHost = el.value; const i = $('newHost'); if (i) i.value = el.value; return; }
@@ -858,12 +1033,13 @@ document.addEventListener('input', (e) => {
   const kind = el.dataset.search;
   if (!kind) return;
   clearTimeout(searchTimer);
-  searchTimer = setTimeout(() => (kind === 'gh' ? searchRepos(el.value.trim()) : searchChannels(el.value.trim())), 250);
+  searchTimer = setTimeout(() => (kind === 'gh' ? searchRepos(el.value.trim()) : kind === 'slme' ? searchMembers(el.value.trim()) : searchChannels(el.value.trim())), 250);
 });
 document.addEventListener('focusin', (e) => {
   const kind = e.target.dataset?.search;
   if (kind === 'gh' && !GH.suggestions) searchRepos(e.target.value.trim());
   if (kind === 'sl' && !SL.channels) searchChannels(e.target.value.trim());
+  if (kind === 'slme' && !SL.members) searchMembers(e.target.value.trim());
 });
 document.addEventListener('keydown', (e) => {
   if ((e.metaKey || e.ctrlKey) && e.key === ',') { e.preventDefault(); openSettings(); }
@@ -884,7 +1060,9 @@ async function poll(once) {
     $('hosts').innerHTML = S.hosts.map(hostStats).join('');
     renderBoard();
     renderPrs();
+    prAlerts(S.events);
     if (!$('branchesScrim').hidden) renderBranches();
+    if (!$('statsScrim').hidden && Date.now() - UI.statsAt > 60e3) loadStats(true);
     if (!$('settingsScrim').hidden && UI.pane === 'pastures' && !$('prefs').contains(document.activeElement)) renderSettings();
   } catch {
     $('hosts').innerHTML = `<div class="host"><span class="dot down"></span>${NATIVE ? 'Sheepdog’s server stopped. Use the menu bar icon to restart it.' : 'Sheepdog isn’t running. Start it with <code>npm start</code>.'}</div>`;
@@ -892,7 +1070,7 @@ async function poll(once) {
   if (!once) setTimeout(poll, 2000);
 }
 
-// Routes the Mac app (and links) can open: #settings, #settings/<pane>, #setup, #branches
+// Routes the Mac app (and links) can open: #settings, #settings/<pane>, #setup, #branches, #stats, #stats/<1|7|30>
 function route_(r) {
   r = String(r || '').replace(/^#/, '');
   if (!r) return;
@@ -900,6 +1078,7 @@ function route_(r) {
   if (what === 'settings') openSettings(PANES.some(([id]) => id === pane) ? pane : undefined);
   else if (what === 'setup') openWizard();
   else if (what === 'branches') actions.branches();
+  else if (what === 'stats') { if ([1, 7, 30].includes(Number(pane))) UI.statsDays = Number(pane); actions.stats(); }
   else if (what === 'board') closeAll();
   history.replaceState(null, '', location.pathname);
 }

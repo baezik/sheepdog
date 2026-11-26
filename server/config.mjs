@@ -20,6 +20,9 @@ export const DEFAULTS = {
     windowFlash: true,
     alertAfterSeconds: 0,
     quietHours: { enabled: false, start: '22:00', end: '08:00' },
+    prReview: true, // someone started reviewing your PR
+    prApproved: true, // your PR was approved
+    prNudgeHours: 4, // a teammate's PR has had no reviewer this long (0 = off)
   },
   board: { density: 'auto', showPrs: true },
   tickets: { pattern: '\\b[A-Z][A-Z0-9]{1,9}-\\d+\\b', link: '' },
@@ -107,6 +110,7 @@ const EDITABLE = {
   'alerts.notify': 'boolean', 'alerts.sound': ['Woof', 'Ding', 'Bleat', 'Silent'], 'alerts.windowFlash': 'boolean',
   'alerts.alertAfterSeconds': 'number', 'alerts.quietHours.enabled': 'boolean',
   'alerts.quietHours.start': 'time', 'alerts.quietHours.end': 'time',
+  'alerts.prReview': 'boolean', 'alerts.prApproved': 'boolean', 'alerts.prNudgeHours': 'number',
   'board.density': ['auto', 'comfortable', 'compact'], 'board.showPrs': 'boolean',
   'tickets.pattern': 'regex', 'tickets.link': 'string',
   'github.branches': 'strings', 'github.clientId': 'string',

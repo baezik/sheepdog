@@ -145,3 +145,62 @@ test('token cleanup and diagnosis', async () => {
   assert.match(tokenProblem('1234567890.1234567890'), /Client ID/);
   assert.match(tokenProblem('hello'), /isn’t a Slack token/);
 });
+
+test('PR alerts: review started, approved, and a nudge, each once', async () => {
+  const sl = await import('../server/slack.mjs');
+  const { updateConfig } = await import('../server/config.mjs');
+  updateConfig((c) => { c.alerts.prNudgeHours = 0.05; }); // 3 minutes, so #15 (posted 5 min ago) is overdue
+  await sl.refreshSlack(); // earlier tests already set the baseline; this one only adds the nudge
+  const hist = SLACK['conversations.history'].messages;
+  const p12 = hist.find((m) => m.text.includes('pull/12|'));
+  p12.reactions = [{ name: 'eyes', users: ['UALICE', 'UBOB', 'UCAROL'], count: 3 }];
+  await sl.refreshSlack();
+  p12.reactions.push({ name: 'white_check_mark', users: ['UBOB'], count: 1 });
+  await sl.refreshSlack();
+  await sl.refreshSlack(); // nothing new
+  const kinds = sl.prEvents.map((e) => e.kind);
+  assert.deepEqual(kinds, ['nudge', 'review', 'approved']);
+  const [nudge, review, approved] = sl.prEvents;
+  assert.match(nudge.body, /web #15/);
+  assert.equal(review.title, 'Carol started reviewing your PR');
+  assert.equal(approved.title, 'Bob approved your PR');
+  assert.equal(approved.url, 'https://github.com/acme/web/pull/12');
+  assert.ok(!sl.slack.prs.some((p) => p.number === 12), 'approved PR left the sidebar');
+});
+
+test('team bot: bot-only manifest, switching revokes the personal token, pick yourself', async () => {
+  const sl = await import('../server/slack.mjs');
+  const { getConfig, updateConfig } = await import('../server/config.mjs');
+  const bot = JSON.parse(decodeURIComponent(sl.manifestUrl('bot').split('manifest_json=')[1]));
+  assert.equal(bot.oauth_config.scopes.user, undefined, 'the team bot app asks for no user scopes');
+  assert.deepEqual(bot.oauth_config.scopes.bot.sort(), ['channels:history', 'channels:read', 'groups:history', 'groups:read', 'reactions:read', 'users:read']);
+
+  const revoked = [];
+  SLACK['auth.revoke'] = (p) => { revoked.push(p); return { ok: true, revoked: true }; };
+  SLACK['users.list'] = { ok: true, members: [
+    { id: 'UALICE', name: 'alice', real_name: 'Alice Doe', profile: { display_name: 'Alice' } },
+    { id: 'UBOB', name: 'bob', real_name: 'Bob Roe', profile: { display_name: 'Bob' } },
+    { id: 'UDAN', name: 'dan', real_name: 'Dan Not-in-channel', profile: { display_name: 'Dan' } },
+    { id: 'UBOT', name: 'sheepdog', is_bot: true, profile: {} },
+    { id: 'UGONE', name: 'gone', deleted: true, profile: {} },
+  ] };
+  SLACK['conversations.members'] = { ok: true, members: ['UALICE', 'UBOB', 'UBOT'] };
+
+  updateConfig((c) => { c.slack.token = 'xoxp-1-personal'; c.slack.userId = 'UALICE'; c.slack.user = 'Alice'; });
+  const r = await sl.connect('xoxb-1-' + 'b'.repeat(20));
+  assert.equal(r.kind, 'bot');
+  assert.equal(revoked.length, 1, 'the replaced personal token was revoked');
+  assert.equal(getConfig().slack.userId, 'UALICE', 'switching keeps who you are');
+  assert.equal(getConfig().slack.user, 'Alice');
+
+  const people = await sl.listMembers('');
+  assert.deepEqual(people.map((u) => u.id), ['UALICE', 'UBOB'], 'only real people in the review channel');
+  assert.deepEqual((await sl.listMembers('roe')).map((u) => u.name), ['Bob']);
+  await sl.setMe('UBOB');
+  assert.equal(getConfig().slack.userId, 'UBOB');
+  await assert.rejects(sl.setMe('nope'), /Invalid/);
+
+  await sl.disconnect();
+  assert.equal(revoked.length, 1, 'a shared bot token is never revoked');
+  assert.equal(getConfig().slack.token, '');
+});

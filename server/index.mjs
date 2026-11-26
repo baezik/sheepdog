@@ -10,6 +10,7 @@ import { hostState, pollAllHosts, testHost, sshConfigHosts, validSshTarget } fro
 import { updateTabTargets, focusAgent, isFocusable, terminalsInstalled, requestAutomation } from './terminal.mjs';
 import * as gh from './github.mjs';
 import * as sl from './slack.mjs';
+import * as history from './history.mjs';
 import { log, loop } from './util.mjs';
 
 // SHEEPDOG_PORT=0 picks a free port (the Mac app does this) and reports it on stdout.
@@ -32,6 +33,7 @@ function boardState() {
     github: { connected: c.github.auth !== 'none', ok: gh.github.ok, at: gh.github.at, error: gh.github.error, viewer: gh.github.viewer,
       branchNames: c.github.branches, branches: gh.github.branches },
     slack: { connected: !!c.slack.token, channel: c.slack.channelName, ok: sl.slack.ok, at: sl.slack.at, error: sl.slack.error, prs: sl.slack.prs },
+    events: sl.prEvents,
     settings: { idleMinutes: c.idleMinutes, alerts: c.alerts, board: c.board, ticketLink: c.tickets.link },
   };
 }
@@ -41,7 +43,11 @@ const routes = {
   'GET /api/state': () => boardState(),
   'GET /api/config': () => publicConfig(),
   'POST /api/config': (b) => { patchConfig(b); return publicConfig(); },
-  'POST /api/reset': () => { resetConfig(); gh.disconnect(); sl.disconnect(); return publicConfig(); },
+  'POST /api/reset': async () => { await sl.disconnect(); resetConfig(); gh.disconnect(); return publicConfig(); },
+
+  // statistics
+  'GET /api/stats': (_, q) => history.stats(Number(q.get('days')) || 7),
+  'POST /api/stats/clear': () => { history.clear(); return { ok: true }; },
 
   // machines
   'GET /api/detect': async () => {
@@ -116,12 +122,15 @@ const routes = {
   'GET /api/slack/status': () => {
     const s = getConfig().slack;
     return { connected: !!s.token, team: s.team, user: s.user, userId: s.userId, kind: /^(xoxe\.)?xoxp-/.test(s.token) ? 'user' : s.token ? 'bot' : null,
-      channelId: s.channelId, channelName: s.channelName, reviewing: s.reviewing, approved: s.approved, manifestUrl: sl.manifestUrl(),
+      channelId: s.channelId, channelName: s.channelName, reviewing: s.reviewing, approved: s.approved, manifestUrl: sl.manifestUrl(), manifestUrlBot: sl.manifestUrl('bot'),
       error: sl.slack.error, prCount: sl.slack.prs.length };
   },
   'POST /api/slack/token': async (b) => sl.connect(b.token),
-  'POST /api/slack/disconnect': () => { sl.disconnect(); return { ok: true }; },
+  // keepIdentity: switching tokens (e.g. to the team bot), so remember who you are
+  'POST /api/slack/disconnect': async (b) => { await sl.disconnect({ keepIdentity: !!b.keepIdentity }); return { ok: true }; },
   'GET /api/slack/channels': (_, q) => sl.listChannels(q.get('q') || ''),
+  'GET /api/slack/members': (_, q) => sl.listMembers(q.get('q') || ''),
+  'POST /api/slack/me': async (b) => { const me = await sl.setMe(b.id); sl.refreshSlack(); return me; },
   'POST /api/slack/channel': async (b) => {
     if (!/^[CG][A-Z0-9]{4,20}$/.test(b.id || '')) throw new Error('Invalid channel');
     updateConfig((c) => { c.slack.channelId = b.id; c.slack.channelName = String(b.name || '').slice(0, 80); });
@@ -191,7 +200,9 @@ server.listen(PORT, '127.0.0.1', () => {
   PORT = server.address().port;
   log(`Sheepdog on http://127.0.0.1:${PORT}  (settings in ${CONFIG_DIR})`);
   if (process.env.SHEEPDOG_APP) console.log(`SHEEPDOG_READY port=${PORT}`);
-  refreshHosts = loop(pollAllHosts, () => Math.max(1, getConfig().pollSeconds) * 1000);
+  refreshHosts = loop(async () => { await pollAllHosts(); history.observe(hostState); }, () => Math.max(1, getConfig().pollSeconds) * 1000);
+  setTimeout(() => loop(() => history.sample(hostState), history.SAMPLE_SECONDS * 1000), 15000); // after the first polls
+  loop(history.prune, 6 * 3600e3);
   loop(updateTabTargets, 4000);
   loop(gh.refreshGithub, 60000);
   loop(sl.refreshSlack, 10000);

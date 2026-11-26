@@ -11,6 +11,7 @@
 <header>
   <button class="btn" data-act="settings" title="Settings (⌘,)">⚙︎</button>
   <button class="btn" data-act="branches" title="Last merge per repository">⎇ Branches</button>
+  <button class="btn" data-act="stats" title="Statistics: agent time, response times, tokens, PR reviews">📊 Stats</button>
   <div class="spacer"></div>
   <div class="hosts" id="hosts"></div>
 </header>
@@ -36,6 +37,15 @@
     <div class="legend"><span><span class="ok">✓</span> merged in the last hour</span><span>— nothing merged yet</span><a href="#" data-act="settings" data-pane="github">Edit repositories…</a></div>
   </div>
 </div>
+<div class="scrim" id="statsScrim" hidden>
+  <div class="modal stats">
+    <div class="modal-head"><b>Statistics</b><span id="statsRange"></span>
+      <div class="seg" id="statsDays"><button data-act="stats-days" data-days="1">Today</button><button data-act="stats-days" data-days="7">7 days</button><button data-act="stats-days" data-days="30">30 days</button></div>
+      <button class="btn" data-act="close">✕</button></div>
+    <div id="statsBody"></div>
+  </div>
+</div>
+<div class="tip" id="tip" hidden></div>
 <div class="scrim" id="settingsScrim" hidden><div class="prefs" id="prefs"></div></div>
 <div class="scrim" id="wizardScrim" hidden><div class="wizard" id="wizard"></div></div>
 <div class="toast" id="toast"></div>

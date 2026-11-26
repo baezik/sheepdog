@@ -98,7 +98,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             menu.bark()
         case "notify":
             notify(title: msg["title"] as? String ?? "An agent is waiting", body: msg["body"] as? String ?? "",
-                   id: msg["id"] as? String ?? UUID().uuidString, focusKey: msg["focusKey"] as? String ?? "")
+                   id: msg["id"] as? String ?? UUID().uuidString, focusKey: msg["focusKey"] as? String ?? "",
+                   url: msg["url"] as? String ?? "")
         case "requestNotifications":
             requestNotifications()
         default:
@@ -137,20 +138,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         }
     }
 
-    private func notify(title: String, body: String, id: String, focusKey: String) {
+    private func notify(title: String, body: String, id: String, focusKey: String, url: String = "") {
         guard canNotify else { return }
         let c = UNMutableNotificationContent()
         c.title = title
         c.body = body
-        c.categoryIdentifier = "agent"
-        c.userInfo = ["focusKey": focusKey]
+        // PR alerts carry a GitHub link and open it; agent alerts jump to the agent's tab
+        let isLink = url.hasPrefix("https://")
+        c.categoryIdentifier = isLink ? "pr" : "agent"
+        c.userInfo = ["focusKey": focusKey, "url": isLink ? url : ""]
         // the page plays the chosen Sheepdog sound itself, so no system sound here
         UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: id, content: c, trigger: nil))
     }
 
     func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
                                 withCompletionHandler done: @escaping () -> Void) {
-        let key = response.notification.request.content.userInfo["focusKey"] as? String ?? ""
+        let info = response.notification.request.content.userInfo
+        let key = info["focusKey"] as? String ?? ""
+        if let link = info["url"] as? String, link.hasPrefix("https://"), let url = URL(string: link) {
+            DispatchQueue.main.async { NSWorkspace.shared.open(url) }
+            done()
+            return
+        }
         DispatchQueue.main.async { self.focus(key, fallbackToBoard: true) }
         done()
     }

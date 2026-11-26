@@ -5,7 +5,8 @@ Watches Claude Code and Codex on your computer and your other machines, and tell
 - **Board**: one card per agent: your turn (amber, sorted first), working (green), idle (grey, after 30 min unanswered). Cards show the ticket, title, last prompt, machine, context % and tokens. Click a card to jump to its terminal tab (cmux or iTerm2).
 - **PR sidebar**: pull requests posted in a Slack channel you pick. Newest post first, refreshed every 10 seconds. 👀 = someone is reviewing. PRs leave once approved (✅ in Slack or approved on GitHub), merged or closed.
 - **Branches**: last merge per repository on the branches you track (e.g. dev / staging / main), with CI and deploy status.
-- **Alerts**: notification, sound (Woof / Ding / Bleat / Silent), window flash, quiet hours.
+- **Stats**: agent time per day or hour, when your agents work (weekday × hour), how fast you answer waiting agents, how many run in parallel, tokens by ticket / repository / model, and PR review times (until someone reviews, until approved, who reviews most).
+- **Alerts**: notification, sound (Woof / Ding / Bleat / Silent), window flash, quiet hours. PR alerts too: someone started reviewing your PR, your PR was approved, a teammate's PR has had no reviewer for hours (click to open the PR).
 
 Free and open source (MIT).
 
@@ -65,12 +66,17 @@ The first run opens the setup wizard: detect agents here → pick SSH machines �
 2. *Personal access token*: `repo` + `read:org` (classic), or a fine-grained token with read access to contents, pull requests, deployments and commit statuses.
 3. *Sign in with GitHub*: OAuth device flow. Needs an OAuth app with Device Flow enabled; set its client ID in Settings › GitHub or ship it with `SHEEPDOG_GITHUB_CLIENT_ID`.
 
-**Slack**: Settings › Slack › *Create Slack app* opens Slack with Sheepdog's manifest prefilled (read-only scopes: `channels:history`, `groups:history`, `channels:read`, `groups:read`, `reactions:read`, `users:read`). Install it, paste the *User OAuth Token* (`xoxp-`), and pick the review channel. A bot token (`xoxb-`) works too if the bot is invited to the channel; then set your member ID so Sheepdog knows which PRs are yours.
+**Slack**, two ways:
+1. *Team bot (recommended for teams):* one person clicks *Create the Sheepdog bot* in Settings › Slack (a bot-only app: no user permissions), installs it, types `/invite @Sheepdog` in the review channel, and shares the *Bot User OAuth Token* (`xoxb-`) with the team through a password manager. Everyone pastes it, picks the channel, and picks themselves from the channel's members. The bot reads messages and reactions only in channels it's invited to; like any workspace member it can also see channel names and the member directory (no emails). Disconnecting never revokes a shared bot token.
+2. *Personal app:* create the app from the personal manifest and paste its *User OAuth Token* (`xoxp-`). It reads with your own access (every channel you're in), so prefer the bot. Disconnecting, or switching to a bot token, revokes the personal token in Slack.
+
+Scopes (read-only): `channels:history`, `groups:history`, `channels:read`, `groups:read`, `reactions:read`, `users:read`.
 
 ## Privacy and security
 
 - Listens on `127.0.0.1` only; rejects other Host headers (DNS rebinding) and cross-site writes.
 - Settings and tokens live in `~/.config/sheepdog/config.json` (mode 600). The browser never receives tokens.
+- Statistics history lives in `~/.config/sheepdog/history/` (one small file per day, deleted after 90 days, never uploaded). Settings › Advanced › Clear statistics deletes it.
 - Jump-to-tab only reads tab titles/ttys and selects tabs; it never types into or reads a session.
 
 ## Layout
@@ -84,14 +90,16 @@ server/hosts.mjs      local + SSH probing, ~/.ssh/config, Codex terminal mapping
 server/probe.py       runs on each machine; lists agents, context, tokens, load
 server/terminal.mjs   cmux / iTerm2 tab mapping and focus
 server/github.mjs     auth (gh / token / device flow), repos, branches, PR state
-server/slack.mjs      auth, channel picker, PR sidebar from reactions
+server/slack.mjs      auth, channel picker, PR sidebar from reactions, PR alerts
+server/history.mjs    statistics history (samples, answers, PR timelines) and the numbers behind 📊 Stats
 public/               board, settings, setup wizard (no build step)
 test/                 node:test, no network
 ```
 
 ## Known limits
 
-- Slack doesn't record *when* a reaction was added, so "reviewing since" is when Sheepdog first saw the 👀.
+- Slack doesn't record *when* a reaction was added, so "reviewing since" is when Sheepdog first saw the 👀. The same goes for review times in Stats.
+- Stats count time only while Sheepdog runs (one sample a minute).
 - Claude logs don't record the context window size: 200k is assumed unless the session has gone past it (then 1M). Override with `CLAUDE_CONTEXT_WINDOW`.
 - "⧗ queue" is the 1-minute load average minus the CPU count.
 - macOS-first: jump-to-tab needs macOS; the board and probes also work on Linux.
