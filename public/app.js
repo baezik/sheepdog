@@ -8,6 +8,11 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '
 const NATIVE = window.webkit?.messageHandlers?.sheepdog || null;
 const native = (msg) => { try { NATIVE?.postMessage(msg); } catch {} };
 window.sheepdogNative = { notif: 'unknown', setNotif(s) { this.notif = s; rerender(); }, open(route) { route_(route); } };
+// agent kinds Sheepdog recognizes, as shown to people
+const KINDS = { claude: 'Claude', codex: 'Codex', gemini: 'Gemini', agy: 'Antigravity' };
+const kindName = (k) => KINDS[k] || k || 'Agent';
+// a command that fixes a problem, with a Copy button
+const fixHtml = (cmd) => (cmd ? ` <span class="fix"><code>${esc(cmd)}</code><button class="btn solid" data-act="copy" data-text="${esc(cmd)}" data-stop="1">Copy</button></span>` : '');
 const get = (o, key) => key.split('.').reduce((x, k) => (x == null ? x : x[k]), o);
 
 async function api(path, body) {
@@ -110,7 +115,7 @@ function ticketHtml(t) {
 
 function card(a) {
   const label = { turn: 'Your turn', working: 'Working', idle: 'Idle' }[a.status];
-  const title = a.title || a.prompt || `${a.kind === 'codex' ? 'Codex' : 'Claude'} in ${a.repo || '?'}`;
+  const title = a.title || a.prompt || `${kindName(a.kind)} in ${a.repo || '?'}`;
   const pct = a.contextPct;
   const tok = fmtTokens(a.tokens);
   const warn = pct != null && pct >= 85;
@@ -122,7 +127,7 @@ function card(a) {
     <div class="body">
       <div class="title">${ticketHtml(a.ticket)}<span>${esc(title)}</span></div>
       ${a.prompt && a.prompt !== title ? `<div class="prompt">${esc(a.prompt)}</div>` : ''}
-      <div class="meta"><span class="chip host">${esc(a.hostName)}</span><span class="chip">${a.kind === 'codex' ? 'Codex' : 'Claude'}${a.app ? ' app' : ''}</span>${a.repo ? `<span class="repo">${esc(a.repo)}</span>` : ''}</div>
+      <div class="meta"><span class="chip host">${esc(a.hostName)}</span><span class="chip">${kindName(a.kind)}${a.app ? ' app' : ''}</span>${a.repo ? `<span class="repo">${esc(a.repo)}</span>` : ''}</div>
       ${ctx}
     </div>
   </div>`;
@@ -132,9 +137,10 @@ function renderBoard() {
   const agents = agentsOf(S);
   const board = $('board');
   const down = S.hosts.filter((h) => h.enabled && h.error && !h.ok);
-  const banner = down.length ? `<div class="banner">Can't reach ${down.map((h) => `<b>${esc(h.name)}</b>`).join(', ')}: ${esc(down[0].error)} <a href="#" data-act="settings" data-pane="pastures">Check machines…</a></div>` : '';
+  let banner = down.length ? `<div class="banner">Can't reach ${down.map((h) => `<b>${esc(h.name)}</b>`).join(', ')}: ${esc(down[0].error)}${fixHtml(down[0].fix)} <a href="#" data-act="settings" data-pane="access">Check access…</a></div>` : '';
+  if (S.cmuxBlocked) banner += `<div class="banner info">cmux isn’t letting Sheepdog switch tabs yet. <a href="#" data-act="settings" data-pane="access">How to fix…</a></div>`;
   if (!agents.length) {
-    board.innerHTML = `${banner}<div class="empty"><div class="pic">🐶</div><b>No agents running.</b><div>Start Claude Code or Codex on a watched machine<br>and it will appear here.</div></div>`;
+    board.innerHTML = `${banner}<div class="empty"><div class="pic">🐶</div><b>No agents running.</b><div>Start Claude Code, Codex, Gemini CLI or Antigravity (agy)<br>on a watched machine and it will appear here.</div></div>`;
   } else {
     const d = S.settings.board.density;
     const compact = d === 'compact' || (d === 'auto' && agents.length > 10);
@@ -170,11 +176,11 @@ function alertOn(agents) {
   native({ type: 'bark' });
   if (NATIVE) {
     if (al.notify) for (const a of fresh.slice(0, 3)) {
-      native({ type: 'notify', title: `${a.title || 'An agent'} is waiting`, body: `${a.hostName} · ${a.kind === 'codex' ? 'Codex' : 'Claude'}${a.prompt ? ` — ${a.prompt}` : ''}`, id: a.key, focusKey: a.focusable ? a.focusKey : '' });
+      native({ type: 'notify', title: `${a.title || 'An agent'} is waiting`, body: `${a.hostName} · ${kindName(a.kind)}${a.prompt ? ` — ${a.prompt}` : ''}`, id: a.key, focusKey: a.focusable ? a.focusKey : '' });
     }
   } else if (al.notify && 'Notification' in window && Notification.permission === 'granted') {
     for (const a of fresh.slice(0, 3)) {
-      const n2 = new Notification(`${a.title || 'An agent'} is waiting`, { body: `${a.hostName} · ${a.kind === 'codex' ? 'Codex' : 'Claude'}${a.prompt ? ` — ${a.prompt}` : ''}`, tag: a.key });
+      const n2 = new Notification(`${a.title || 'An agent'} is waiting`, { body: `${a.hostName} · ${kindName(a.kind)}${a.prompt ? ` — ${a.prompt}` : ''}`, tag: a.key });
       n2.onclick = () => { window.focus(); if (a.focusable) focusAgent(a.focusKey); n2.close(); };
     }
   }
@@ -392,7 +398,7 @@ function renderStats() {
     ${table('By ticket', d.tickets, [['Ticket', (x) => ticketHtml(x.name)], ['Agent time', work, 'n'], ['Tokens', tok, 'n']])}
     ${table('By repository', d.repos, [['Repository', (x) => esc(x.name)], ['Agent time', work, 'n'], ['Tokens', tok, 'n']])}
     ${table('By model', d.models, [['Model', (x) => esc(x.name)], ['Agent time', work, 'n'], ['Tokens', tok, 'n']])}
-    ${table('Longest waits', r.longest, [['Agent', (x) => `${x.ticket ? ticketHtml(x.ticket) + ' ' : ''}${esc(x.title || x.repo || (x.kind === 'codex' ? 'Codex' : 'Claude'))}`], ['Waited', (x) => hrs(x.wait), 'n'], ['When', (x) => esc(clock(x.at)), 'n when']])}
+    ${table('Longest waits', r.longest, [['Agent', (x) => `${x.ticket ? ticketHtml(x.ticket) + ' ' : ''}${esc(x.title || x.repo || kindName(x.kind))}`], ['Waited', (x) => hrs(x.wait), 'n'], ['When', (x) => esc(clock(x.at)), 'n when']])}
   </div>`;
   if (r.away) html += `<div class="st-note">Not counted as answers: ${r.away} time${r.away === 1 ? '' : 's'} an agent waited longer than ${S.settings.idleMinutes} min (you were away).</div>`;
   if (S.slack.connected || p.posted) {
@@ -498,11 +504,11 @@ const busy = (on, label) => (on ? `<span class="spin"></span>` : label);
 function hostSub(h) {
   const s = S?.hosts.find((x) => x.id === h.id);
   const t = UI.hostTest[h.id];
-  if (t) return t.busy ? '<span class="spin"></span> Testing…' : `<span class="${t.ok ? 'ok' : 'err'}">${esc(t.text)}</span>`;
+  if (t) return t.busy ? '<span class="spin"></span> Testing…' : `<span class="${t.ok ? 'ok' : 'err'}">${esc(t.text)}</span>${t.ok ? '' : fixHtml(t.fix)}`;
   if (!h.enabled) return h.type === 'ssh' ? `SSH · <code>${esc(h.ssh)}</code> · paused` : 'Paused';
   const where = h.type === 'ssh' ? `SSH · <code>${esc(h.ssh)}</code>` : 'This computer';
   if (!s || (!s.ok && !s.error)) return `${where} · connecting…`;
-  if (!s.ok) return `<span class="err">${esc(s.error)}</span>`;
+  if (!s.ok) return `<span class="err">${esc(s.error)}</span>${fixHtml(s.fix)}`;
   const agents = (s.agents || []).filter((a) => !a.parent && !a.headless);
   return `${where} · ${agents.length ? `${agents.length} agent${agents.length > 1 ? 's' : ''}` : 'no agents running'} · checked ${agoMs(s.at)}`;
 }
@@ -527,8 +533,8 @@ function panePastures() {
         <input class="field wide mono" id="newHost" placeholder="alias or user@host" value="${esc(UI.newHost)}" autocomplete="off" spellcheck="false">
         <button class="btn solid" data-act="host-add">${busy(t?.busy, 'Test and add')}</button>
       </div>
-      ${t && !t.busy ? `<div class="sub ${t.ok ? 'ok' : 'err'}">${esc(t.text)}</div>` : ''}
-      <div class="note">The machine needs SSH key login (no password prompt) and <code>python3</code>. Sheepdog runs a small read-only script there over SSH; nothing is installed.</div>
+      ${t && !t.busy ? `<div class="sub ${t.ok ? 'ok' : 'err'}">${esc(t.text)}${t.ok ? '' : fixHtml(t.fix)}</div>` : ''}
+      <div class="note">The machine needs SSH key login (no password prompt) and <code>python3</code>. New machines are trusted on first connect, and login commands in <code>~/.ssh/config</code> (like attaching to tmux) are skipped. Sheepdog runs a small read-only script there over SSH; nothing is installed.</div>
     </div>`])}
     ${group('Connection', [
       row('Check every', '', select('pollSeconds', [[2, '2 seconds'], [3, '3 seconds'], [5, '5 seconds'], [10, '10 seconds']], 'number')),
@@ -586,7 +592,14 @@ function paneTickets() {
 }
 
 // ---------------------------------------------------------------- pane: terminal
-const TERM = { cmux: null, iterm: null, installed: null };
+const TERM = { cmux: null, iterm: null, installed: null, cmuxMode: null };
+const CMUX_MODES = { cmuxOnly: 'cmux processes only', off: 'Off', automation: 'Automation mode', password: 'Password mode', allowAll: 'Full open access' };
+function cmuxHelpHtml() {
+  const cm = TERM.cmuxMode;
+  if (!TERM.installed?.cmux || !cm?.blocked) return '';
+  return `<div class="banner info"><b>cmux is blocking Sheepdog.</b> Its Socket Control Mode is “${esc(CMUX_MODES[cm.mode] || cm.mode)}”, which only lets programs started inside cmux control it.
+    <ol class="steps" style="margin:6px 0 0"><li>In cmux, open <b>Settings › Automation</b>.</li><li>Set <b>Socket Control Mode</b> to <b>Automation mode</b>.</li><li>Come back here and click <b>Allow…</b> next to cmux.</li></ol></div>`;
+}
 function paneTerminal() {
   const inst = TERM.installed;
   const r = (app, name) => {
@@ -594,12 +607,86 @@ function paneTerminal() {
     const ctl = !inst ? '' : !inst[app] ? '<span class="sub">Not installed</span>'
       : st === 'busy' ? '<span class="spin"></span>' : st === 'ok' ? '<span class="status-ok">✓ Allowed</span>'
       : `<button class="btn ${st === 'err' ? 'solid' : 'primary'}" data-act="term-allow" data-app="${app}">${st === 'err' ? 'Try again' : 'Allow…'}</button>`;
-    return row(name, 'Automation access, to switch to an agent’s tab', ctl);
+    const sub = app === 'cmux' && cm?.mode ? `Socket Control Mode: ${esc(CMUX_MODES[cm.mode] || cm.mode)}${cm.blocked ? ' · <span class="err">blocks Sheepdog</span>' : ''}` : 'Automation access, to switch to an agent’s tab';
+    return row(name, sub, ctl);
   };
-  return `<div class="pane-head">Terminal</div>
+  const cm = TERM.cmuxMode;
+  return `<div class="pane-head">Terminal</div>${cmuxHelpHtml()}
     <div class="note">When you click an agent, Sheepdog switches your terminal to its tab. macOS asks you once per app. Sheepdog only reads tab titles and selects tabs; it never types into or reads your sessions.</div>
     ${group('Jump to tab', [r('cmux', 'cmux'), r('iterm', 'iTerm2')])}
     ${group('cmux socket password', [row('Password', 'Only if cmux runs its control socket in password mode', `<input class="field" id="cmuxPw" type="password" placeholder="${cfg.terminal.cmuxPassword.set ? '••••••• saved' : 'not set'}" autocomplete="off"><button class="btn solid" data-act="cmux-pw">Save</button>`)])}`;
+}
+
+// ---------------------------------------------------------------- pane: access
+// Everything Sheepdog needs permission for, with a live status and a button that opens the right place.
+const ACCESS = { data: null, at: 0, busy: false };
+async function loadAccess() {
+  ACCESS.busy = true; rerender();
+  try { ACCESS.data = await api('/api/access'); ACCESS.at = Date.now(); } catch (e) { toast(e.message, true); }
+  ACCESS.busy = false; rerender();
+}
+function accessItems(inWizard) {
+  const d = ACCESS.data;
+  if (!d) return [];
+  const items = [];
+  const btn = (label, act, extra = '', cls = 'solid') => `<button class="btn ${cls}" data-act="${act}" ${extra}>${label}</button>`;
+  const open = (what, label) => btn(label, 'access-open', `data-what="${what}"`);
+  // notifications
+  const n = NATIVE ? window.sheepdogNative.notif : 'Notification' in window ? Notification.permission : 'unsupported';
+  items.push({ ok: n === 'granted', name: 'Notifications', why: 'So Sheepdog can tell you when an agent waits or a PR gets reviewed.',
+    status: n === 'granted' ? 'Allowed' : n === 'denied' ? 'Turned off for Sheepdog' : n === 'unsupported' || n === 'unavailable' ? 'Not available here' : 'Not allowed yet',
+    actions: n === 'denied' ? (NATIVE ? open('notifications', 'Open Notification settings') : '') : n === 'granted' || n === 'unsupported' || n === 'unavailable' ? '' : btn('Allow…', 'notif-allow', '', 'primary') });
+  // python on this Mac
+  if (d.python.enabled) items.push({ ok: d.python.ok, name: 'Read agents on this Mac', why: 'Needs Python 3, which comes with Apple’s Command Line Tools.',
+    status: d.python.ok ? 'Working' : d.python.error || 'Checking…', actions: d.python.needsTools ? open('python', 'Install Command Line Tools…') : '' });
+  // cmux
+  if (d.cmux.installed) {
+    const blocked = d.cmux.blocked || /only process|access denied/i.test(d.cmux.error || '');
+    items.push({ ok: d.cmux.ok, name: 'cmux: jump to an agent’s tab', why: 'cmux only lets outside apps control it in Automation mode.',
+      status: d.cmux.ok ? `Allowed (${CMUX_MODES[d.cmux.mode] || d.cmux.mode})` : blocked ? `Blocked: Socket Control Mode is “${CMUX_MODES[d.cmux.mode] || 'cmux processes only'}”` : d.cmux.error || 'Not checked',
+      steps: blocked ? ['Click <b>Open cmux</b>, then open its <b>Settings</b> (⌘,) › <b>Automation</b>.', 'Set <b>Socket Control Mode</b> to <b>Automation mode</b>.', 'Click <b>Check again</b>. Still blocked? Quit and reopen cmux once.'] : null,
+      actions: blocked ? open('cmux-settings', 'Open cmux') : d.cmux.ok ? '' : btn('Try again', 'access-check') });
+  }
+  // iTerm2
+  if (d.iterm.installed) {
+    const st = TERM.iterm;
+    items.push({ ok: st === 'ok', name: 'iTerm2: jump to an agent’s tab', why: 'macOS asks once whether Sheepdog may control iTerm2 (Automation).',
+      status: st === 'ok' ? 'Allowed' : st === 'err' ? 'Not allowed: turn on iTerm2 for Sheepdog under Automation' : 'Not checked',
+      actions: st === 'ok' ? '' : `${btn('Allow…', 'term-allow', 'data-app="iterm"', 'primary')}${st === 'err' ? open('automation', 'Open Automation settings') : ''}` });
+  }
+  // machines
+  for (const m of d.machines.filter((x) => x.enabled)) {
+    items.push({ ok: m.ok, name: `Machine: ${esc(m.name)}`, why: 'SSH key login and Python 3 on the machine.',
+      status: m.ok ? 'Connected' : m.error || 'Connecting…', fix: m.fix, actions: btn('Machines…', 'pane', 'data-pane="pastures"') });
+  }
+  if (!inWizard) {
+    if (d.slack.connected) {
+      const notIn = /isn’t in that channel|not_in_channel|channel_not_found/i.test(d.slack.error || '');
+      items.push({ ok: d.slack.ok && !!d.slack.channel && (!d.slack.bot || d.slack.me), name: 'Slack review channel', why: d.slack.bot ? 'The bot must be in the channel, and you pick yourself.' : 'Reads the channel with your own access.',
+        status: !d.slack.channel ? 'No channel picked' : notIn ? `The Sheepdog bot isn’t in #${esc(d.slack.channel)}` : d.slack.error ? esc(d.slack.error) : d.slack.bot && !d.slack.me ? 'Pick yourself, so “Yours” and PR alerts work' : `Reading #${esc(d.slack.channel)}`,
+        fix: notIn ? '/invite @Sheepdog' : null, actions: btn('Slack…', 'pane', 'data-pane="slack"') });
+    }
+    if (d.github.connected) items.push({ ok: d.github.ok && !d.github.error, name: 'GitHub', why: 'For PR states, checks and approvals.',
+      status: d.github.error ? esc(d.github.error) : 'Connected', actions: d.github.error ? btn('GitHub…', 'pane', 'data-pane="github"') : '' });
+  }
+  return items;
+}
+function accessHtml(inWizard) {
+  if (!ACCESS.data) return `<div class="note"><span class="spin"></span> Checking what Sheepdog can reach…</div>`;
+  const items = accessItems(inWizard);
+  const bad = items.filter((i) => !i.ok).length;
+  const rows = items.map((i) => `<div class="row access ${i.ok ? 'good' : 'bad'}"><span class="mark">${i.ok ? '✓' : '!'}</span>
+    <div class="lbl"><div>${i.name}</div><div class="sub">${i.ok ? esc(i.status) : `<span class="err">${i.status}</span>`}${i.fix && !i.ok ? fixHtml(i.fix) : ''}</div>
+      ${!i.ok ? `<div class="sub why">${i.why}</div>` : ''}${i.steps && !i.ok ? `<ol class="steps">${i.steps.map((x) => `<li>${x}</li>`).join('')}</ol>` : ''}</div>
+    ${i.actions ? `<div class="ctl">${i.actions}</div>` : ''}</div>`);
+  return `<div class="access-head">${bad ? `<b>${bad} thing${bad === 1 ? '' : 's'} need${bad === 1 ? 's' : ''} your attention</b>` : '<b class="ok">✓ Sheepdog has everything it needs</b>'}
+      <button class="btn solid" data-act="access-check">${busy(ACCESS.busy, 'Check again')}</button></div>
+    ${group('', rows)}`;
+}
+function paneAccess() {
+  return `<div class="pane-head">Access</div>
+    <div class="note">What Sheepdog needs permission for, and whether it has it. Each button takes you to the right setting.</div>
+    ${accessHtml(false)}`;
 }
 
 function paneAdvanced() {
@@ -733,17 +820,18 @@ function slSuggestHtml() {
 
 // ---------------------------------------------------------------- settings window
 const PANES = [
-  ['pastures', 'Machines', '🐑'], ['alerts', 'Alerts', '🔔'], ['board', 'Board', '▦'], ['slack', 'Slack', '#'],
+  ['access', 'Access', '🔑'], ['pastures', 'Machines', '🐑'], ['alerts', 'Alerts', '🔔'], ['board', 'Board', '▦'], ['slack', 'Slack', '#'],
   ['github', 'GitHub', '⎇'], ['tickets', 'Tickets', '⌗'], ['terminal', 'Terminal', '>_'], ['advanced', 'Advanced', '⚙︎'],
 ];
 function renderSettings() {
   const dot = (id) => {
     if (id === 'slack') return `<span class="st" style="background:${S?.slack.connected ? (S.slack.error ? 'var(--red)' : 'var(--green)') : 'transparent'}"></span>`;
+    if (id === 'access' && ACCESS.data) { const bad = accessItems(false).filter((i) => !i.ok).length; return `<span class="st" style="background:${bad ? 'var(--amber)' : 'var(--green)'}"></span>`; }
     if (id === 'github') return `<span class="st" style="background:${S?.github.connected ? (S.github.error ? 'var(--red)' : 'var(--green)') : 'transparent'}"></span>`;
     return '';
   };
   const body = {
-    pastures: panePastures, alerts: paneAlerts, board: paneBoard, tickets: paneTickets, terminal: paneTerminal, advanced: paneAdvanced,
+    access: paneAccess, pastures: panePastures, alerts: paneAlerts, board: paneBoard, tickets: paneTickets, terminal: paneTerminal, advanced: paneAdvanced,
     github: () => `<div class="pane-head">GitHub</div><div class="note">Used for the Branches view and for the live state of pull requests in the sidebar.</div>${githubBody(false)}`,
     slack: () => `<div class="pane-head">Slack</div><div class="note">The PR review sidebar reads one Slack channel. 👀 means someone is reviewing; ✅ approved PRs drop off.</div>${slackBody(false)}`,
   }[UI.pane]();
@@ -755,9 +843,13 @@ function renderSettings() {
 function openPane(pane) {
   UI.pane = pane;
   if (pane === 'github') loadGh();
+  if (pane === 'access') { if (!TERM.installed) api('/api/detect').then((d) => { TERM.installed = d.terminals; TERM.cmuxMode = d.cmux; }, () => {}); loadAccess(); }
   if (pane === 'slack') loadSl();
   if (pane === 'pastures' && !UI.sshHosts) api('/api/ssh-hosts').then((h) => { UI.sshHosts = h; rerender(); }, () => {});
-  if (pane === 'terminal' && !TERM.installed) api('/api/detect').then((d) => { TERM.installed = d.terminals; rerender(); }, () => {});
+  if (pane === 'terminal') {
+    if (!TERM.installed) api('/api/detect').then((d) => { TERM.installed = d.terminals; TERM.cmuxMode = d.cmux; rerender(); }, () => {});
+    else api('/api/terminal/cmux').then((m) => { TERM.cmuxMode = m; rerender(); }, () => {});
+  }
 }
 
 async function openSettings(pane) {
@@ -778,11 +870,11 @@ function wizardHtml() {
     center = true;
     body = `<div class="hero"><span>🐕</span><span class="flock"><span>🐑</span><span>🐑</span><span>🐑</span></span></div>
       <div class="wiz-h">Let’s find your flock</div>
-      <div class="wiz-p" style="max-width:380px">Sheepdog watches Claude Code and Codex on this computer and your other machines, and tells you the moment one is waiting for you.</div>`;
+      <div class="wiz-p" style="max-width:380px">Sheepdog watches Claude Code, Codex, Gemini CLI and Antigravity on this computer and your other machines, and tells you the moment one is waiting for you.</div>`;
   } else if (step === 'mac') {
     const d = WZ.detect;
     const local = d?.local;
-    body = `<div style="display:flex;gap:12px;align-items:center"><span style="font-size:32px">🐶</span><div><div class="wiz-h">Sniffing this computer…</div><div class="wiz-p">Looking for Claude Code and Codex in your terminals.</div></div></div>
+    body = `<div style="display:flex;gap:12px;align-items:center"><span style="font-size:32px">🐶</span><div><div class="wiz-h">Sniffing this computer…</div><div class="wiz-p">Looking for Claude Code, Codex, Gemini CLI and Antigravity in your terminals.</div></div></div>
       ${!d ? '<div class="note"><span class="spin"></span> Looking…</div>' : group('', [
         `<div class="found"><span class="${local.ok ? 'tick' : 'err'}">${local.ok ? '✓' : '✕'}</span><div class="lbl"><div>${local.ok ? esc(local.summary[0].toUpperCase() + local.summary.slice(1)) : 'Could not run the probe'}</div><div class="sub ${local.ok ? '' : 'err'}">${local.ok ? esc(local.host) : esc(local.error)}</div></div>${local.ok && local.agents ? '<span>🐑</span>' : ''}</div>`,
         `<div class="found"><span class="tick">✓</span><div class="lbl"><div>Terminals</div><div class="sub">${[d.terminals.cmux && 'cmux', d.terminals.iterm && 'iTerm2'].filter(Boolean).join(', ') || 'No supported terminal found; cards still work, without jump-to-tab'}</div></div></div>`,
@@ -793,7 +885,7 @@ function wizardHtml() {
       const r = WZ.results[h];
       const on = WZ.selected.has(h);
       return `<div class="found"><button class="check ${on ? 'on' : ''}" data-act="wz-host" data-ssh="${esc(h)}">${on ? '✓' : ''}</button>
-        <div class="lbl"><div class="mono">${esc(h)}</div><div class="sub ${r && !r.busy ? (r.ok ? 'ok' : 'err') : ''}">${r ? (r.busy ? '<span class="spin"></span> Testing…' : esc(r.ok ? `Connected · ${r.summary}` : r.error)) : 'Not checked'}</div></div>
+        <div class="lbl"><div class="mono">${esc(h)}</div><div class="sub ${r && !r.busy ? (r.ok ? 'ok' : 'err') : ''}">${r ? (r.busy ? '<span class="spin"></span> Testing…' : r.ok ? esc(`Connected · ${r.summary}`) : esc(r.error) + fixHtml(r.fix)) : 'Not checked'}</div></div>
         <button class="btn solid" data-act="wz-host-test" data-ssh="${esc(h)}">Test</button></div>`;
     });
     body = `<div><div class="wiz-h">Other pastures</div><div class="wiz-p">Machines from <code>~/.ssh/config</code>. Pick the ones running agents. They need key-based SSH and <code>python3</code>.</div></div>
@@ -801,10 +893,11 @@ function wizardHtml() {
       <div style="display:flex;gap:6px"><input class="field wide mono" id="wzHost" placeholder="Another machine: alias or user@host" autocomplete="off" spellcheck="false"><button class="btn solid" data-act="wz-host-add">Add</button></div>
       <div class="note">You can skip this and add machines later in Settings › Machines.</div>`;
   } else if (step === 'terminal') {
-    if (!TERM.installed && WZ.detect) TERM.installed = WZ.detect.terminals;
-    body = `<div><div class="wiz-h">Let Sheepdog jump to the right tab</div><div class="wiz-p">When you click an agent, Sheepdog switches your terminal to its tab. macOS asks you to allow this once per app. Sheepdog only reads tab titles and selects tabs. It never types into or reads your sessions.</div></div>
-      ${paneTerminal().replace(/^[\s\S]*?(<div><div class="group-title">Jump to tab)/, '$1').replace(/<div><div class="group-title">cmux socket[\s\S]*$/, '')}
-      <div class="note">Change later in System Settings › Privacy &amp; Security › Automation.</div>`;
+    if (!TERM.installed && WZ.detect) { TERM.installed = WZ.detect.terminals; TERM.cmuxMode = WZ.detect.cmux; }
+    if (!ACCESS.data && !ACCESS.busy) loadAccess();
+    body = `<div><div class="wiz-h">Give Sheepdog access</div><div class="wiz-p">A few things need your permission: notifications, switching to an agent’s terminal tab, and the machines you picked. Each button opens the right setting. Sheepdog only reads tab titles and selects tabs; it never types into or reads your sessions.</div></div>
+      ${accessHtml(true)}
+      <div class="note">You can come back to this any time in Settings › Access.</div>`;
   } else if (step === 'github') {
     body = `<div><div class="wiz-h">Connect GitHub <span class="badge">OPTIONAL</span></div><div class="wiz-p">Shows the last merge on each branch of the repositories you pick, and whether PRs in the sidebar are merged or failing checks.</div></div>${githubBody(true)}`;
   } else if (step === 'slack') {
@@ -890,6 +983,17 @@ const actions = {
   'today-open': () => { UI.statsDays = 1; actions.stats(); },
   leaderboard: () => { closeAll(); $('lbScrim').hidden = false; loadLeaderboard(); },
   'lb-days': (el) => { UI.lbDays = Number(el.dataset.days); loadLeaderboard(); },
+  'access-check': () => loadAccess(),
+  'access-open': async (el) => {
+    try {
+      const r = await api('/api/access/open', { what: el.dataset.what });
+      if (el.dataset.what === 'cmux-settings') toast(r.direct ? 'Opened cmux › Settings › Automation' : 'Opened cmux: now ⌘, › Automation');
+    } catch (e) { toast(e.message, true); }
+  },
+  copy: async (el) => {
+    try { await navigator.clipboard.writeText(el.dataset.text); toast('Copied. Paste it in Terminal'); }
+    catch { toast(el.dataset.text); }
+  },
   'stats-days': (el) => { UI.statsDays = Number(el.dataset.days); loadStats(); },
   'stats-clear': async () => {
     if (!confirm('Delete all Sheepdog statistics? This can’t be undone.')) return;
@@ -923,7 +1027,7 @@ const actions = {
     UI.hostTest[id] = { busy: true }; rerender();
     try {
       const r = await api('/api/hosts/test', { id });
-      UI.hostTest[id] = { ok: r.ok, text: r.ok ? `Connected in ${r.ms} ms · ${r.summary}` : r.error };
+      UI.hostTest[id] = { ok: r.ok, text: r.ok ? `Connected in ${r.ms} ms · ${r.summary}` : r.error, fix: r.fix };
     } catch (e) { UI.hostTest[id] = { ok: false, text: e.message }; }
     rerender();
     setTimeout(() => { delete UI.hostTest[id]; rerender(); }, 8000);
@@ -941,7 +1045,7 @@ const actions = {
     UI.hostTest.__new = { busy: true }; rerender();
     try {
       const r = await api('/api/hosts/test', { ssh });
-      if (!r.ok) { UI.hostTest.__new = { ok: false, text: `Couldn’t connect: ${r.error}` }; rerender(); return; }
+      if (!r.ok) { UI.hostTest.__new = { ok: false, text: `Couldn’t connect: ${r.error}`, fix: r.fix }; rerender(); return; }
       await api('/api/hosts/add', { ssh, name: ssh });
       UI.hostTest.__new = { ok: true, text: `Added ${ssh} · ${r.summary}` };
       UI.newHost = '';
@@ -956,6 +1060,7 @@ const actions = {
     TERM[app] = 'busy'; rerender();
     const r = await api('/api/terminal/allow', { app }).catch((e) => ({ ok: false, error: e.message }));
     TERM[app] = r.ok ? 'ok' : 'err';
+    if (app === 'cmux') TERM.cmuxMode = await api('/api/terminal/cmux').catch(() => TERM.cmuxMode);
     if (!r.ok) toast(`${app === 'iterm' ? 'iTerm2' : 'cmux'}: ${r.error}`, true);
     rerender();
   },

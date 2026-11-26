@@ -11,8 +11,32 @@ import { run, log } from './util.mjs';
 const PROBE = path.join(path.dirname(fileURLToPath(import.meta.url)), 'probe.py');
 const SSH_OPTS = [
   '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=6',
+  // trust a machine's key the first time, like answering "yes" to ssh (a changed key is still refused)
+  '-o', 'StrictHostKeyChecking=accept-new',
+  // ignore a RemoteCommand / RequestTTY in ~/.ssh/config (e.g. "attach to tmux"): ssh refuses to run our command
+  // alongside it ("Cannot execute command-line and remote command"). Only affects Sheepdog's connections.
+  '-o', 'RemoteCommand=none', '-o', 'RequestTTY=no',
   '-o', 'ControlMaster=auto', '-o', `ControlPath=${os.tmpdir()}/sheepdog-%r@%h:%p`, '-o', 'ControlPersist=10m',
 ];
+
+/** Turns ssh's error into what's wrong and how to fix it: { error, fix } (fix is a command to run, or null). */
+export function sshProblem(raw, target) {
+  const m = String(raw || '');
+  const host = target || 'the machine';
+  const known = [
+    [/REMOTE HOST IDENTIFICATION HAS CHANGED|Host key for .* has changed/i, `${host}’s identity (host key) changed since you last connected, so SSH refuses it. If the machine was reinstalled or rebuilt, forget the old key, then click Test again.`, `ssh-keygen -R ${host}`],
+    [/Host key verification failed/i, `SSH doesn’t trust ${host} yet. Connect once in Terminal and answer “yes”, then click Test again.`, `ssh ${host}`],
+    [/Permission denied \(.*publickey/i, `${host} wants a password, but Sheepdog can only log in with an SSH key. Copy your key to it once (asks for the password one last time).`, `ssh-copy-id ${host}`],
+    [/Too many authentication failures/i, `SSH tried too many keys and ${host} gave up. Add “IdentitiesOnly yes” and the right “IdentityFile” for it in ~/.ssh/config.`, null],
+    [/Could not resolve hostname/i, `Can’t find ${host}. Check the name, or the Host entry in ~/.ssh/config.`, null],
+    [/timed out|No route to host|Network is unreachable/i, `${host} isn’t answering. Is it running, and are you on the right network or VPN?`, null],
+    [/Connection refused/i, `${host} is up but SSH isn’t accepting connections (wrong port, or SSH isn’t running there).`, null],
+    [/Cannot execute command-line and remote command/i, `The ~/.ssh/config entry for ${host} runs its own command on login. Update Sheepdog; newer versions handle this.`, null],
+    [/python3: (command )?not found|No such file or directory.*python3|python3.*not found/i, `Python 3 isn’t installed on ${host}. Sheepdog needs it there to read the agents.`, 'sudo apt install -y python3'],
+  ];
+  for (const [re, error, fix] of known) if (re.test(m)) return { error, fix };
+  return { error: m.split('\n').filter(Boolean).pop() || 'Couldn’t connect', fix: null };
+}
 
 /** user@host, alias or host:port style targets only, so a value can never become an ssh option. */
 export const validSshTarget = (t) => typeof t === 'string' && /^[A-Za-z0-9_][A-Za-z0-9_.@-]{0,200}$/.test(t);
@@ -49,7 +73,14 @@ async function probeOn(host) {
   }
   if (!validSshTarget(host.ssh)) throw new Error('Invalid SSH host');
   probeSrc ||= await readFile(PROBE, 'utf8');
-  return JSON.parse(await run('ssh', [...SSH_OPTS, host.ssh, 'python3', '-'], { input: probeSrc, timeout: 20000 }));
+  let out;
+  try {
+    out = await run('ssh', [...SSH_OPTS, host.ssh, 'python3', '-'], { input: probeSrc, timeout: 20000 });
+  } catch (e) {
+    const p = sshProblem(e.message, host.ssh);
+    throw Object.assign(new Error(p.error), { fix: p.fix });
+  }
+  return JSON.parse(out);
 }
 
 function ticketOf(a, re) {
@@ -127,7 +158,7 @@ export async function pollHost(host) {
     hostState.set(host.id, { ok: true, at: Date.now(), ...data });
   } catch (e) {
     const prev = hostState.get(host.id) || {};
-    hostState.set(host.id, { ...prev, ok: false, at: prev.at || 0, error: e.message, failedAt: Date.now() });
+    hostState.set(host.id, { ...prev, ok: false, at: prev.at || 0, error: e.message, fix: e.fix || null, failedAt: Date.now() });
     if (!prev.error || prev.error !== e.message) log(`probe ${host.name} failed:`, e.message);
   }
 }
@@ -144,13 +175,13 @@ export async function testHost(host) {
   try {
     const d = await probeOn(host);
     const agents = d.agents.filter((a) => !a.parent && !a.headless);
-    const kinds = ['claude', 'codex'].map((k) => [k, agents.filter((a) => a.kind === k).length]).filter(([, n]) => n);
+    const names = { claude: 'Claude', codex: 'Codex', gemini: 'Gemini', agy: 'Antigravity' };
+    const kinds = Object.keys(names).map((k) => [k, agents.filter((a) => a.kind === k).length]).filter(([, n]) => n);
     return { ok: true, ms: Date.now() - t, host: d.host, agents: agents.length,
-      summary: kinds.length ? kinds.map(([k, n]) => `${n} ${k === 'claude' ? 'Claude' : 'Codex'}`).join(', ') : 'no agents running' };
+      summary: kinds.length ? kinds.map(([k, n]) => `${n} ${names[k]}`).join(', ') : 'no agents running' };
   } catch (e) {
-    const msg = host.type === 'local' && /ENOENT/.test(e.message) ? NO_PYTHON
-      : /python3: (command )?not found/.test(e.message) ? 'python3 is not installed there' : e.message;
-    return { ok: false, error: msg };
+    const msg = host.type === 'local' && /ENOENT/.test(e.message) ? NO_PYTHON : e.message;
+    return { ok: false, error: msg, fix: e.fix || null };
   }
 }
 

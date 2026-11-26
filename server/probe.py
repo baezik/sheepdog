@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Sheepdog agent probe.
 
-Lists running Claude Code and Codex sessions on this machine plus basic host
+Lists running Claude Code, Codex, Gemini CLI and Antigravity CLI (agy) sessions on this machine plus basic host
 load, and prints one JSON object. It never signals any process; the only file it
 writes is its own token-count cache (~/.cache/sheepdog/claude-tokens.json), so
 it doesn't re-read whole Claude logs every poll. Runs locally, and is piped over
@@ -12,6 +12,7 @@ import json
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 import time
@@ -150,12 +151,13 @@ def agent_kind(pr):
     # skip the Codex app-server daemon/helpers and macOS desktop apps (argv only, not flags)
     if "app-server" in head or "code-mode-host" in head or toks[0].startswith("/Applications/"):
         return None
-    for tok in toks[:2]:
+    # the program, or the script a node/bun interpreter runs (skipping flags like --max-old-space-size=…,
+    # which Gemini CLI adds when it relaunches itself)
+    cand = toks[:1] + [t for t in toks[1:4] if not t.startswith("-")][:1]
+    for tok in cand:
         base = os.path.basename(tok)
-        if base == "codex":
-            return "codex"
-        if base == "claude":
-            return "claude"
+        if base in ("codex", "claude", "gemini", "agy"):
+            return base
     return None
 
 
@@ -399,6 +401,238 @@ def codex_rollouts(since):
     return out
 
 
+# ---------------------------------------------------------------- gemini cli
+# ~/.gemini/tmp/<project>/chats/session-<time>-<id>.jsonl: a header line {sessionId, startTime, lastUpdated, kind},
+# then one line per message ({type: user|gemini|info, timestamp, content, tokens, model}) and {"$set": {...}}
+# updates (lastUpdated, summary). <project> comes from ~/.gemini/projects.json (path -> name).
+GEMINI = os.path.join(HOME, ".gemini")
+GEMINI_WINDOW = int(os.environ.get("GEMINI_CONTEXT_WINDOW", "1000000"))
+
+
+def gemini_chat_dirs(cwd):
+    dirs = []
+    try:
+        with open(os.path.join(GEMINI, "projects.json")) as f:
+            name = (json.load(f).get("projects") or {}).get(cwd)
+        if name:
+            dirs.append(os.path.join(GEMINI, "tmp", name, "chats"))
+    except (OSError, ValueError):
+        pass
+    import hashlib
+    dirs.append(os.path.join(GEMINI, "tmp", hashlib.sha256(cwd.encode()).hexdigest(), "chats"))  # older layout
+    return [d for d in dirs if os.path.isdir(d)]
+
+
+def gemini_text(content):
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return " ".join(c.get("text", "") for c in content if isinstance(c, dict) and c.get("text"))
+    return ""
+
+
+def gemini_tokens(path):
+    """(session tokens, context tokens, model), read incrementally like Claude's."""
+    cache = _load_token_cache()
+    key = "gemini:" + path
+    c = cache.get(key) or {"off": 0, "total": 0, "ctx": 0, "model": None, "last": None}
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return c
+    if size < c["off"]:
+        c = {"off": 0, "total": 0, "ctx": 0, "model": None, "last": None}
+    if size > c["off"]:
+        with open(path, "rb") as f:
+            f.seek(c["off"])
+            data = f.read(size - c["off"])
+        end = data.rfind(b"\n") + 1
+        for line in data[:end].split(b"\n"):
+            if b'"tokens"' not in line:
+                continue
+            try:
+                e = json.loads(line)
+            except ValueError:
+                continue
+            t = e.get("tokens") or {}
+            if e.get("type") != "gemini" or not t or e.get("id") == c["last"]:
+                continue
+            c["total"] += t.get("total") or 0
+            c["ctx"] = (t.get("input") or 0) + (t.get("output") or 0)
+            c["model"] = e.get("model") or c["model"]
+            c["last"] = e.get("id")
+        c["off"] += end
+        cache[key] = c
+    return c
+
+
+def gemini_session_info(path):
+    """Header, title, prompts and timing of one Gemini session file."""
+    head = read_json_lines(path, from_end=False, nbytes=4000)[:1]
+    meta = head[0] if head else {}
+    if meta.get("kind") not in (None, "main"):
+        return None  # subagent sessions
+    tail = read_json_lines(path, nbytes=300_000)
+    summary = last_user = first_user = None
+    last_type = last_ts = last_user_ts = None
+    updated = iso_ts(meta.get("lastUpdated"))
+    for e in tail:
+        if "$set" in e:
+            st = e["$set"]
+            summary = st.get("summary") or summary
+            updated = iso_ts(st.get("lastUpdated")) or updated
+            continue
+        t = e.get("type")
+        if t in ("user", "gemini"):
+            last_type, last_ts = t, iso_ts(e.get("timestamp"))
+        if t == "user":
+            txt = gemini_text(e.get("content")).strip()
+            if txt and not txt.startswith("/"):
+                last_user, last_user_ts = txt, iso_ts(e.get("timestamp"))
+    if not first_user:
+        for e in read_json_lines(path, from_end=False, nbytes=60_000):
+            if e.get("type") == "user":
+                first_user = gemini_text(e.get("content")).strip() or None
+                if first_user:
+                    break
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        mtime = None
+    return dict(path=path, sessionId=meta.get("sessionId"), started=iso_ts(meta.get("startTime")),
+                updated=max(x for x in (updated, mtime, 0) if x is not None), title=summary or first_user,
+                prompt=last_user or first_user, lastType=last_type, lastTs=last_ts, lastUserTs=last_user_ts)
+
+
+def gemini_attach(procs):
+    """Give each running gemini process its session: newest session in its folder started after it."""
+    by_cwd = {}
+    for a in procs:
+        by_cwd.setdefault(a.get("cwd") or "", []).append(a)
+    for cwd, group in by_cwd.items():
+        files = []
+        for d in gemini_chat_dirs(cwd) if cwd else []:
+            for p in glob.glob(os.path.join(d, "session-*.jsonl")):
+                try:
+                    files.append((os.path.getmtime(p), p))
+                except OSError:
+                    pass
+        files.sort(reverse=True)
+        sessions = [s for s in (gemini_session_info(p) for _, p in files[:20]) if s]
+        taken = set()
+        for a in sorted(group, key=lambda x: -x["started"]):
+            # a session this process started, else (resumed with --resume) one it has written to since starting
+            mine = [s for s in sessions if s["path"] not in taken and (s["started"] or 0) >= a["started"] - 10] \
+                or [s for s in sessions if s["path"] not in taken and s["updated"] >= a["started"]]
+            if not mine:
+                a.update(state="waiting", stateSince=a["started"], title=None, prompt=None, lastActivity=None, headless=False)
+                continue
+            s = mine[-1] if (mine[-1]["started"] or 0) >= a["started"] - 10 else mine[0]
+            taken.add(s["path"])
+            # Gemini only writes a tool call once it has finished, and nothing while it thinks: count it as
+            # working while the log was just written, the last message is yours, or the process is busy.
+            busy = NOW - s["updated"] < WORKING_WINDOW or (a.get("cpu") or 0) >= 3.0
+            working = busy or (s["lastType"] == "user" and NOW - (s["lastUserTs"] or 0) < 3600 and (a.get("cpu") or 0) >= 1.0)
+            tok = gemini_tokens(s["path"])
+            a.update(sessionId=s["sessionId"], title=clip(s["title"], 80), prompt=clip(s["prompt"]), headless=False,
+                     state="working" if working else "waiting",
+                     stateSince=(s["lastUserTs"] if working else s["updated"]) or a["started"], lastActivity=s["updated"])
+            if tok.get("ctx"):
+                a.update(tokens=tok["total"], contextTokens=tok["ctx"], contextWindow=GEMINI_WINDOW,
+                         contextPct=round(100 * tok["ctx"] / GEMINI_WINDOW), model=tok.get("model"))
+            a["_log"] = "gemini:" + s["path"]
+
+
+# ---------------------------------------------------------------- antigravity cli (agy)
+# ~/.gemini/antigravity-cli/conversation_summaries.db has one row per conversation: title, status
+# (CASCADE_RUN_STATUS_RUNNING / BUSY / CANCELING / IDLE), workspace, last change and last user input.
+AGY = os.path.join(GEMINI, "antigravity-cli")
+
+
+def agy_rows():
+    path = os.path.join(AGY, "conversation_summaries.db")
+    if not os.path.exists(path):
+        return []
+    try:
+        con = sqlite3.connect("file:%s?mode=ro" % path, uri=True, timeout=2)
+        con.row_factory = sqlite3.Row
+        rows = [dict(r) for r in con.execute(
+            "select conversation_id, title, preview, status, workspace_uris, last_modified_time, last_user_input_time, "
+            "killed, nesting_depth from conversation_summaries order by last_modified_time desc limit 50")]
+        con.close()
+        return rows
+    except sqlite3.Error:
+        return []
+
+
+def sql_ts(s):
+    """'2026-11-25 09:11:36.714702+00:00' -> epoch seconds."""
+    if not s:
+        return None
+    try:
+        import calendar
+        base = str(s)[:19]
+        return calendar.timegm(time.strptime(base, "%Y-%m-%d %H:%M:%S"))
+    except ValueError:
+        return None
+
+
+def agy_open_conversations(pid):
+    """Conversation ids a running agy process has open (its .db / presence lock files)."""
+    ids = set()
+    names = []
+    if IS_LINUX:
+        try:
+            for fd in os.listdir(f"/proc/{pid}/fd"):
+                try:
+                    names.append(os.readlink(f"/proc/{pid}/fd/{fd}"))
+                except OSError:
+                    pass
+        except OSError:
+            pass
+    else:
+        names = [l[1:] for l in run(["lsof", "-p", str(pid), "-Fn"]).splitlines() if l.startswith("n")]
+    for n in names:
+        m = re.search(r"antigravity-cli/(?:conversations|presence)/([0-9a-f-]{36})\.(?:db|lock)", n)
+        if m:
+            ids.add(m.group(1))
+    return ids
+
+
+def agy_prompts():
+    out = {}
+    for e in read_json_lines(os.path.join(AGY, "history.jsonl"), nbytes=200_000):
+        if e.get("conversationId") and e.get("display"):
+            out[e["conversationId"]] = e["display"]
+    return out
+
+
+def agy_attach(procs):
+    rows = [r for r in agy_rows() if not r.get("killed") and not r.get("nesting_depth")]
+    prompts = agy_prompts() if procs else {}
+    taken = set()
+    for a in sorted(procs, key=lambda x: -x["started"]):
+        open_ids = agy_open_conversations(a["pid"])
+        mine = [r for r in rows if r["conversation_id"] in open_ids and r["conversation_id"] not in taken]
+        if not mine:  # fall back to the newest conversation in its folder changed since it started
+            uri = "file://" + (a.get("cwd") or "")
+            mine = [r for r in rows if r["conversation_id"] not in taken and uri in (r.get("workspace_uris") or "")
+                    and (sql_ts(r["last_modified_time"]) or 0) >= a["started"] - 10]
+        if not mine:
+            a.update(state="waiting", stateSince=a["started"], title=None, prompt=None, lastActivity=None, headless=False)
+            continue
+        r = mine[0]
+        taken.add(r["conversation_id"])
+        status = r.get("status") or ""
+        working = status.endswith(("RUNNING", "BUSY", "CANCELING"))
+        changed = sql_ts(r["last_modified_time"])
+        asked = sql_ts(r["last_user_input_time"])
+        a.update(sessionId=r["conversation_id"], title=clip(r.get("title") or r.get("preview"), 80),
+                 prompt=clip(prompts.get(r["conversation_id"]) or r.get("preview")), headless=False,
+                 state="working" if working else "waiting",
+                 stateSince=(asked if working else changed) or a["started"], lastActivity=changed)
+
+
 # ---------------------------------------------------------------- host
 def host_stats():
     st = {"host": os.uname().nodename.split(".")[0], "ncpu": os.cpu_count()}
@@ -443,7 +677,7 @@ def main():
     cwds = get_cwds(agents)
 
     result = []
-    codex_procs = []
+    codex_procs, gemini_procs, agy_procs = [], [], []
     for pid in agents:
         pr = procs[pid]
         # parent agent (sub-agent / headless child), walking up the tree
@@ -460,9 +694,17 @@ def main():
             a.update(claude_session(pid, a["cwd"]))
             if " -p" in f" {pr['args']} " or "--print" in pr["args"]:
                 a["headless"] = True
-        else:
+        elif a["kind"] == "codex":
             codex_procs.append(a)
+        elif a["kind"] == "gemini":
+            gemini_procs.append(a)
+            if " -p " in f" {pr['args']} " or "--prompt " in pr["args"]:
+                a["headless"] = True
+        else:
+            agy_procs.append(a)
         result.append(a)
+    gemini_attach(gemini_procs)
+    agy_attach(agy_procs)
 
     # match codex TUI processes to their rollout logs by start time
     rollouts = codex_rollouts(NOW - 2 * 86400) if codex_procs else codex_rollouts(NOW - 3600)

@@ -6,12 +6,12 @@ import path from 'node:path';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { getConfig, publicConfig, patchConfig, updateConfig, resetConfig, CONFIG_DIR } from './config.mjs';
-import { hostState, pollAllHosts, testHost, sshConfigHosts, validSshTarget } from './hosts.mjs';
-import { updateTabTargets, focusAgent, isFocusable, terminalsInstalled, requestAutomation } from './terminal.mjs';
+import { hostState, pollAllHosts, testHost, sshConfigHosts, validSshTarget, NO_PYTHON } from './hosts.mjs';
+import { updateTabTargets, focusAgent, isFocusable, terminalsInstalled, requestAutomation, cmuxSocketMode, cmuxBlocks, CMUX_FIX, CMUX_BIN } from './terminal.mjs';
 import * as gh from './github.mjs';
 import * as sl from './slack.mjs';
 import * as history from './history.mjs';
-import { log, loop } from './util.mjs';
+import { log, loop, run } from './util.mjs';
 
 // SHEEPDOG_PORT=0 picks a free port (the Mac app does this) and reports it on stdout.
 let PORT = Number(process.env.SHEEPDOG_PORT ?? 4848);
@@ -20,12 +20,16 @@ const STATIC = { '/': 'index.html', '/app.js': 'app.js', '/style.css': 'style.cs
 const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8' };
 
 // ---------------------------------------------------------------- state for the board
+let cmuxBlocked = false;
+setInterval(async () => { cmuxBlocked = cmuxBlocks(await cmuxSocketMode().catch(() => null)); }, 30e3).unref?.();
+cmuxSocketMode().then((m) => { cmuxBlocked = cmuxBlocks(m); }, () => {});
+
 function boardState() {
   const c = getConfig();
   const hosts = c.hosts.map((h) => {
     const s = hostState.get(h.id) || {};
     const agents = (s.agents || []).map((a) => ({ ...a, focusable: !!a.pid && isFocusable(`${h.id}:${a.pid}`) }));
-    return { id: h.id, name: h.name, type: h.type, enabled: h.enabled, ok: !!s.ok, at: s.at || 0, error: s.error || null,
+    return { id: h.id, name: h.name, type: h.type, enabled: h.enabled, ok: !!s.ok, at: s.at || 0, error: s.error || null, fix: s.fix || null,
       hostname: s.host, ncpu: s.ncpu, load: s.load, mem: s.mem, disk: s.disk, now: s.now, agents };
   });
   return {
@@ -34,6 +38,7 @@ function boardState() {
       branchNames: c.github.branches, branches: gh.github.branches },
     slack: { connected: !!c.slack.token, channel: c.slack.channelName, ok: sl.slack.ok, at: sl.slack.at, error: sl.slack.error, prs: sl.slack.prs },
     events: sl.prEvents,
+    cmuxBlocked,
     today: c.board.showToday ? history.today(c.slack.userId) : null,
     settings: { idleMinutes: c.idleMinutes, alerts: c.alerts, board: c.board, ticketLink: c.tickets.link },
   };
@@ -54,7 +59,8 @@ const routes = {
   // machines
   'GET /api/detect': async () => {
     const local = await testHost({ type: 'local' });
-    return { local, terminals: terminalsInstalled(), gh: await gh.ghInstalled(), sshHosts: sshConfigHosts(), platform: process.platform };
+    const mode = await cmuxSocketMode();
+    return { local, terminals: terminalsInstalled(), cmux: { mode, blocked: cmuxBlocks(mode), fix: CMUX_FIX }, gh: await gh.ghInstalled(), sshHosts: sshConfigHosts(), platform: process.platform };
   },
   'GET /api/ssh-hosts': () => sshConfigHosts(),
   'POST /api/hosts/test': async (b) => {
@@ -90,9 +96,49 @@ const routes = {
     return c.hosts;
   },
 
+  // access: everything Sheepdog needs permission for, in one checklist (Settings › Access, setup wizard)
+  'GET /api/access': async () => {
+    const c = getConfig();
+    const local = c.hosts.find((h) => h.type === 'local');
+    const ls = hostState.get('local') || {};
+    const term = terminalsInstalled();
+    const mode = await cmuxSocketMode();
+    let cmuxOk = null;
+    if (term.cmux && !cmuxBlocks(mode)) cmuxOk = await requestAutomation('cmux').then((r) => (r.ok ? true : r.error));
+    return {
+      python: { enabled: !!local?.enabled, ok: !!ls.ok, error: ls.ok ? null : ls.error || null, needsTools: ls.error === NO_PYTHON },
+      cmux: { installed: term.cmux, mode, blocked: cmuxBlocks(mode), ok: cmuxOk === true, error: cmuxOk === true ? null : cmuxOk },
+      iterm: { installed: term.iterm },
+      machines: c.hosts.filter((h) => h.type === 'ssh').map((h) => {
+        const s = hostState.get(h.id) || {};
+        return { id: h.id, name: h.name, ssh: h.ssh, enabled: h.enabled, ok: !!s.ok, error: s.ok ? null : s.error || null, fix: s.ok ? null : s.fix || null };
+      }),
+      slack: { connected: !!c.slack.token, channel: c.slack.channelName, ok: sl.slack.ok, error: sl.slack.error, bot: !!c.slack.token && !/^(xoxe\.)?xoxp-/.test(c.slack.token), me: !!c.slack.userId },
+      github: { connected: c.github.auth !== 'none', ok: gh.github.ok, error: gh.github.error },
+    };
+  },
+  // open the right settings page (macOS), or start an install
+  'POST /api/access/open': async (b) => {
+    const urls = {
+      automation: 'x-apple.systempreferences:com.apple.preference.security?Privacy_Automation',
+      notifications: 'x-apple.systempreferences:com.apple.Notifications-Settings.extension',
+    };
+    if (process.platform !== 'darwin') throw new Error('Only on macOS');
+    if (urls[b.what]) { await run('open', [urls[b.what]]); return { ok: true }; }
+    if (b.what === 'cmux-settings') {
+      // goes straight to Settings › Automation when cmux already lets Sheepdog in; otherwise just opens cmux
+      const direct = await run(CMUX_BIN, ['settings', 'open', 'automation'], { timeout: 8000 }).then(() => true, () => false);
+      if (!direct) await run('open', ['-a', 'cmux']);
+      return { ok: true, direct };
+    }
+    if (b.what === 'python') { await run('xcode-select', ['--install']).catch(() => {}); return { ok: true }; }
+    throw new Error('Unknown setting');
+  },
+
   // terminal
   'POST /api/focus': (b) => (/^[\w.-]+:\d+$/.test(b.key || '') ? focusAgent(b.key) : { ok: false, error: 'bad key' }),
   'POST /api/terminal/allow': (b) => requestAutomation(b.app),
+  'GET /api/terminal/cmux': async () => { const mode = await cmuxSocketMode(); return { mode, blocked: cmuxBlocks(mode), fix: CMUX_FIX }; },
   'POST /api/terminal/cmux-password': (b) => {
     if (typeof b.password !== 'string' || b.password.length > 200) throw new Error('Invalid password');
     updateConfig((c) => { c.terminal.cmuxPassword = b.password.trim(); });

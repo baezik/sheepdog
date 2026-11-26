@@ -7,20 +7,46 @@
 //   2. terminal device: the agent's tty, or for remote agents the tty of the local `ssh` client
 //      whose local port equals the remote session's SSH_CONNECTION client port
 //   3. the session title inside the tab title (Codex writes "<session name> | <dir>" there)
-import { existsSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { existsSync, readFileSync } from 'node:fs';
 import { getConfig } from './config.mjs';
 import { hostState, tabTitles } from './hosts.mjs';
 import { run, log } from './util.mjs';
 
 const IS_MAC = process.platform === 'darwin';
-const CMUX_APP = '/Applications/cmux.app/Contents/Resources/bin/cmux';
+// cmux can live in /Applications or ~/Applications
+const CMUX_APP = [path.join('/Applications', 'cmux.app'), path.join(os.homedir(), 'Applications', 'cmux.app')]
+  .map((a) => path.join(a, 'Contents', 'Resources', 'bin', 'cmux')).find((p) => existsSync(p)) || '/Applications/cmux.app/Contents/Resources/bin/cmux';
 const ITERM_APP = '/Applications/iTerm.app';
 let targets = new Map(); // `${hostId}:${pid}` -> { app: 'cmux'|'iterm', ... }
+
+// cmux only lets outside programs (like Sheepdog) use its control socket in some modes, set under
+// cmux › Settings › Automation › Socket Control Mode. "cmux processes only" (the default) and "Off" block us;
+// "Automation mode", "Password mode" (the cmux command reads the saved password) and "Full open access" work.
+const CMUX_CONFIG = path.join(os.homedir(), '.config', 'cmux', 'cmux.json');
+export const CMUX_FIX = 'In cmux, open Settings › Automation and set Socket Control Mode to “Automation mode”. Then click Allow… again.';
+let cmuxModeCache = null;
+export async function cmuxSocketMode() {
+  if (!terminalsInstalled().cmux) return null;
+  if (cmuxModeCache && Date.now() - cmuxModeCache.at < 30e3) return cmuxModeCache.mode;
+  let mode = null;
+  try {
+    // cmux.json allows // comments: only look at lines that aren't commented out
+    const text = readFileSync(CMUX_CONFIG, 'utf8').split('\n').filter((l) => !/^\s*\/\//.test(l)).join('\n');
+    mode = text.match(/"socketControlMode"\s*:\s*"(\w+)"/)?.[1] || null;
+  } catch {}
+  if (!mode) mode = (await run('defaults', ['read', 'com.cmuxterm.app', 'socketControlMode'], { timeout: 3000 }).catch(() => '')).trim() || 'cmuxOnly';
+  cmuxModeCache = { at: Date.now(), mode };
+  return mode;
+}
+export const cmuxBlocks = (mode) => mode === 'cmuxOnly' || mode === 'off';
 
 export function terminalsInstalled() {
   return { cmux: IS_MAC && existsSync(CMUX_APP), iterm: IS_MAC && existsSync(ITERM_APP) };
 }
 
+export const CMUX_BIN = CMUX_APP;
 const cmuxEnv = () => {
   const pw = getConfig().terminal.cmuxPassword || process.env.CMUX_SOCKET_PASSWORD;
   return pw ? { CMUX_SOCKET_PASSWORD: pw } : {};
@@ -186,7 +212,20 @@ export async function requestAutomation(app) {
   if (!IS_MAC) return { ok: false, error: 'Only on macOS' };
   try {
     if (app === 'iterm') await run('osascript', ['-e', 'tell application "iTerm2" to get name'], { timeout: 60000 });
-    else if (app === 'cmux') await cmux(['tree', '--json']);
+    else if (app === 'cmux') {
+      cmuxModeCache = null;
+      const mode = await cmuxSocketMode();
+      if (cmuxBlocks(mode)) return { ok: false, error: `cmux doesn’t let Sheepdog in yet (Socket Control Mode is “${mode === 'off' ? 'Off' : 'cmux processes only'}”). ${CMUX_FIX}`, cmuxMode: mode };
+      try { await cmux(['tree', '--json']); }
+      catch (e) {
+        // the setting can live somewhere Sheepdog didn't look; cmux's own refusal says the same thing
+        if (/only process(es)? started inside cmux|access denied/i.test(e.message)) {
+          cmuxModeCache = { at: Date.now(), mode: 'cmuxOnly' };
+          return { ok: false, error: `cmux doesn’t let Sheepdog in yet (Socket Control Mode is “cmux processes only”). ${CMUX_FIX}`, cmuxMode: 'cmuxOnly' };
+        }
+        throw e;
+      }
+    }
     else return { ok: false, error: 'Unknown app' };
     return { ok: true };
   } catch (e) {

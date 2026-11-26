@@ -208,7 +208,7 @@ export function stats(days = 7, now = Date.now()) {
         }
         tokens += dTok;
         if (b) b.tokens += dTok;
-        const label = kind === 'codex' ? 'Codex' : 'Claude';
+        const label = { codex: 'Codex', gemini: 'Gemini', agy: 'Antigravity' }[kind] || 'Claude';
         for (const [m, k] of [[tickets, ticket], [repos, repo], [models, model || label]]) {
           const o = bump(m, k, 'tokens', dTok);
           if (o) { if (st === 'w') o.work += SAMPLE_SECONDS; o.agents.add(key); }

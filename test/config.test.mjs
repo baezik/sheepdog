@@ -57,3 +57,15 @@ test('ssh targets cannot smuggle options', () => {
   assert.ok(!validSshTarget('host; rm -rf ~'));
   assert.ok(!validSshTarget(''));
 });
+
+test('ssh errors become plain-language problems with a fix', async () => {
+  const { sshProblem } = await import('../server/hosts.mjs');
+  const p = (raw) => sshProblem(raw, 'dev-vm');
+  assert.equal(p('Host key verification failed.').fix, 'ssh dev-vm');
+  assert.equal(p('@@@ WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED! @@@').fix, 'ssh-keygen -R dev-vm');
+  assert.equal(p('user@10.0.0.5: Permission denied (publickey,password).').fix, 'ssh-copy-id dev-vm');
+  assert.equal(p('bash: line 1: python3: command not found').fix, 'sudo apt install -y python3');
+  assert.match(p('ssh: Could not resolve hostname dev-vm: nodename nor servname provided').error, /Can’t find dev-vm/);
+  assert.match(p('ssh: connect to host 10.0.0.5 port 22: Operation timed out').error, /isn’t answering/);
+  assert.deepEqual(p('kex_exchange_identification: something odd\n'), { error: 'kex_exchange_identification: something odd', fix: null });
+});

@@ -1,6 +1,6 @@
 # Sheepdog
 
-Watches Claude Code and Codex on your computer and your other machines, and tells you the moment one is waiting for you. Amber is reserved for "your turn".
+Watches Claude Code, Codex, Gemini CLI and Antigravity CLI (`agy`) on your computer and your other machines, and tells you the moment one is waiting for you. Amber is reserved for "your turn".
 
 - **Board**: one card per agent: your turn (amber, sorted first), working (green), idle (grey, after 30 min unanswered). Cards show the ticket, title, last prompt, machine, context % and tokens. Click a card to jump to its terminal tab (cmux or iTerm2).
 - **PR sidebar**: one card per post in the Slack channel you pick (usually one ticket). A post with several PRs lists them, each with its checks and ✓ when approved or merged; the card leaves once all are done. Counts are of open PRs. With several PRs in one post, each PR's own GitHub approval decides when it's done. Newest post first, refreshed every 10 seconds. 👀 = someone is reviewing. PRs leave once approved (✅ in Slack or approved on GitHub), merged or closed.
@@ -57,11 +57,13 @@ SHEEPDOG_PORT=5000 npm start
 npm test
 ```
 
-The first run opens the setup wizard: detect agents here → pick SSH machines → terminal permissions → GitHub → Slack → alerts. Everything can be changed later in Settings (⌘,).
+The first run opens the setup wizard: detect agents here → pick SSH machines → access (notifications, cmux / iTerm2, machines) → GitHub → Slack → alerts. **Settings › Access** shows the same checklist any time: what Sheepdog needs, whether it has it, and a button that opens the right setting. Everything can be changed later in Settings (⌘,).
 
 ## Connections
 
-**Machines**: any host in `~/.ssh/config`, or `user@host`. Needs key-based SSH (no password prompt) and `python3`. Sheepdog pipes a small read-only script (`server/probe.py`) over SSH each poll; nothing is installed there.
+**Machines**: any host in `~/.ssh/config`, or `user@host`. Needs key-based SSH (no password prompt) and `python3`. A new machine's key is trusted on first connect (like answering "yes"; a changed key is still refused), and a `RemoteCommand` / `RequestTTY` in `~/.ssh/config` (e.g. attach to tmux) is ignored for Sheepdog's connections. When a machine can't be reached, Sheepdog says why and shows the command that fixes it.
+
+**cmux**: Sheepdog controls cmux from outside it, so in cmux › Settings › Automation set **Socket Control Mode** to **Automation mode** (the default, "cmux processes only", blocks it; Password mode works too). Sheepdog detects a blocking mode and says so. Sheepdog pipes a small read-only script (`server/probe.py`) over SSH each poll; nothing is installed there.
 
 **GitHub**: three options:
 1. *GitHub CLI*: reuses `gh auth login`; Sheepdog stores no token.
@@ -103,6 +105,8 @@ test/                 node:test, no network
 - Slack doesn't record *when* a reaction was added, so "reviewing since" is when Sheepdog first saw the 👀. The same goes for review times in Stats.
 - Stats count time only while Sheepdog runs (one sample a minute).
 - Claude logs don't record the context window size: 200k is assumed unless the session has gone past it (then 1M). Override with `CLAUDE_CONTEXT_WINDOW`.
+- Gemini CLI doesn't log a tool call until it has finished, or anything while it thinks: Sheepdog counts it as working while its log was just written or the process is busy, so a pause can briefly look like your turn. Context assumes a 1M window (`GEMINI_CONTEXT_WINDOW`).
+- Antigravity CLI (`agy`): state and title come from its conversation summaries; token counts aren't shown (agy stores them in a binary format).
 - "⧗ queue" is the 1-minute load average minus the CPU count.
 - macOS-first: jump-to-tab needs macOS; the board and probes also work on Linux.
 - Not yet: Developer ID signing + notarization, universal (Intel) build.

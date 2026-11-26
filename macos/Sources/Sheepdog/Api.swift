@@ -66,7 +66,7 @@ struct Agent {
                 let status: Status = working ? .working : (waited >= idleAfter ? .idle : .turn)
                 let pid = (a["pid"] as? Int).map(String.init) ?? ""
                 let sid = a["sessionId"] as? String ?? pid
-                let kind = (a["kind"] as? String) == "codex" ? "Codex" : "Claude"
+                let kind = ["codex": "Codex", "gemini": "Gemini", "agy": "Antigravity"][(a["kind"] as? String) ?? ""] ?? "Claude"
                 let title = (a["title"] as? String) ?? (a["prompt"] as? String) ?? "\(kind) in \(a["repo"] as? String ?? "?")"
                 out.append(Agent(key: "\(hostId):\(sid)", focusKey: pid.isEmpty ? "" : "\(hostId):\(pid)",
                                  focusable: a["focusable"] as? Bool ?? false, title: title, ticket: a["ticket"] as? String,
