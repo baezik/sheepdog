@@ -211,18 +211,21 @@ async function focusAgent(key) {
 
 // ---------------------------------------------------------------- PR sidebar
 function prItem(p) {
-  let rv;
-  if (p.reviewers.length) {
-    const first = Math.min(...p.reviewers.map((r) => r.since));
-    rv = `<div class="rv"><span class="ico">👀</span><div><div class="who">${esc(p.reviewers.map((r) => r.name).join(', '))} ${p.reviewers.length > 1 ? 'are' : 'is'} reviewing</div>
-      <div class="sub">since ${clock(first)}</div></div></div>`;
-  } else {
-    rv = `<div class="rv none"><span class="ico" style="opacity:.5">👀</span><div>No one yet · posted ${agoMs(p.postedAt)}</div></div>`;
+  // the whole card opens the PR on GitHub; the 💬 bubble opens the Slack thread
+  const who = p.yours ? 'you' : (p.poster || p.author || '').split(/\s+/)[0];
+  const ci = { ok: 'checks passing', pending: 'checks running', fail: 'checks failing' }[p.ci] || 'no checks';
+  const reviewing = p.reviewers.length > 0;
+  let foot = '';
+  if (reviewing || (p.replies && p.link)) {
+    const first = reviewing ? Math.min(...p.reviewers.map((r) => r.since)) : 0;
+    const rv = reviewing ? `<span class="pr-rv"><span class="ico">👀</span><span class="names">${esc(p.reviewers.map((r) => r.name).join(', '))} · since ${esc(clock(first))}</span></span>` : '<span></span>';
+    const bubble = p.replies && p.link ? `<a class="pr-replies" href="${esc(p.link)}" target="_blank" rel="noopener" title="Open the thread in Slack">💬 ${p.replies}</a>` : '';
+    foot = `<div class="pr-foot">${rv}${bubble}</div>`;
   }
-  const replies = p.link ? `<div class="replies">${p.replies ? `<b>${p.replies} ${p.replies === 1 ? 'reply' : 'replies'}</b>` : ''}<a href="${esc(p.link)}" target="_blank" rel="noopener">Open in Slack ↗</a></div>` : '';
-  return `<div class="pr"><a href="${esc(p.url)}" target="_blank" rel="noopener" title="Open on GitHub">
-    <div class="pr-top"><span class="ci ${p.ci || ''}"></span><span>${esc(p.repo)} #${p.number}</span><span class="who">${p.yours ? 'you' : esc(p.author || '')}</span></div>
-    <div class="pr-title">${esc(p.title)}</div>${rv}</a>${replies}</div>`;
+  return `<div class="pr ${reviewing ? 'reviewing' : ''}">
+    <a class="pr-main" href="${esc(p.url)}" target="_blank" rel="noopener" title="${esc(`${p.repo} #${p.number} · ${ci} · open on GitHub`)}"></a>
+    <div class="pr-top"><span class="ci ${p.ci || ''}"></span><span class="who">${esc(who)}</span><span class="ago">${agoMs(p.postedAt)}</span></div>
+    <div class="pr-title">${esc(p.title)}</div>${foot}</div>`;
 }
 
 function renderPrs() {
@@ -389,6 +392,8 @@ const toggle = (key) => `<button class="toggle ${get(cfg, key) ? 'on' : ''}" dat
 const select = (key, opts, type = 'string') => `<select class="field" data-set="${key}" data-type="${type}">${opts.map(([v, l]) =>
   `<option value="${esc(v)}" ${String(get(cfg, key)) === String(v) ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>`;
 const field = (key, ph = '', extra = '') => `<input class="field" data-set="${key}" value="${esc(get(cfg, key))}" placeholder="${esc(ph)}" ${extra}>`;
+// stored as "eyes,mag", shown as "eyes, mag"
+const emojiField = (key, ph) => `<input class="field mono" style="width:240px" spellcheck="false" data-set="${key}" value="${esc(String(get(cfg, key) || '').split(',').join(', '))}" placeholder="${esc(ph)}">`;
 const row = (label, sub, ctl, cls = '') => `<div class="row ${cls}"><div class="lbl"><div>${label}</div>${sub ? `<div class="sub">${sub}</div>` : ''}</div>${ctl ? `<div class="ctl">${ctl}</div>` : ''}</div>`;
 const group = (title, rows) => `<div>${title ? `<div class="group-title">${title}</div>` : ''}<div class="group">${rows.join('')}</div></div>`;
 const busy = (on, label) => (on ? `<span class="spin"></span>` : label);
@@ -610,8 +615,8 @@ function slackBody(inWizard) {
     ${group('Review channel', [row(chan, chanSub, ''), `<div class="row col"><input class="field wide" id="slChan" data-search="sl" placeholder="Search channels" value="${esc(SL.query)}" autocomplete="off">${err}</div>
       <div class="suggest" id="slSuggest">${slSuggestHtml()}</div>`])}
     ${inWizard ? '' : group('Reactions', [
-      row('Reviewing', 'Someone has started reviewing (emoji name)', field('slack.reviewing', 'eyes', 'class="field mono" style="width:170px"')),
-      row('Approved', 'Removes the PR from the sidebar (emoji name)', field('slack.approved', 'white_check_mark', 'class="field mono" style="width:170px"')),
+      row('Reviewing', 'Someone has started reviewing. Emoji names, comma-separated; any of them counts', emojiField('slack.reviewing', 'eyes, mag')),
+      row('Approved', 'Removes the PR from the sidebar. Emoji names, comma-separated', emojiField('slack.approved', 'white_check_mark, heavy_check_mark')),
     ])}
     ${inWizard ? '' : group('History', [row('Look back', 'Older posts leave the sidebar', select('slack.lookbackDays', [[3, '3 days'], [7, '1 week'], [14, '2 weeks'], [30, '30 days']], 'number'))])}`;
 }

@@ -2,6 +2,7 @@
 // PR, and turns reactions into review state:
 //   :eyes: (configurable)             -> someone is reviewing (name + since when Sheepdog first saw it)
 //   :white_check_mark: (configurable) -> approved
+// Each setting is a comma-separated list of emoji names ("eyes,mag"); any of them counts.
 // Changes to your PRs (review started, approved) and teammates' PRs waiting too long become alerts
 // (prEvents), and every PR's review timeline goes to the statistics history.
 // Thread replies link back to Slack. PRs leave the list once approved (✅ or GitHub approval), when
@@ -223,6 +224,7 @@ function prUrlsIn(msg) {
 }
 
 const tsToMs = (ts) => Math.round(Number(ts) * 1000);
+export const emojiList = (v) => String(v || '').split(',').map((x) => x.trim()).filter(Boolean);
 
 export async function refreshSlack() {
   const s = getConfig().slack;
@@ -247,9 +249,10 @@ export async function refreshSlack() {
       const urls = prUrlsIn(m);
       if (!urls.length) continue;
       const reactions = m.reactions || [];
-      const users_ = (name) => reactions.find((r) => r.name === name || r.name.startsWith(`${name}::`))?.users || [];
-      const reviewers = users_(s.reviewing);
-      const approvers = users_(s.approved);
+      // everyone who reacted with any of the names (skin tones arrive as "name::skin-tone-2")
+      const users_ = (names) => [...new Set(reactions.filter((r) => names.includes(r.name.split('::')[0])).flatMap((r) => r.users || []))];
+      const reviewers = users_(emojiList(s.reviewing));
+      const approvers = users_(emojiList(s.approved));
       const since = (who, kind) => {
         const k = `${m.ts}:${kind}:${who}`;
         if (!seen[k]) seen[k] = now;
@@ -317,7 +320,7 @@ export async function refreshSlack() {
       if (done || approved) continue;
       prs.push({
         url: it.url, link: it.link, repo, number, title,
-        author: author || posterName, yours, postedAt: it.postedAt, ci: d?.ci || null, draft: !!d?.draft,
+        author: author || posterName, poster: it.poster ? posterName : null, yours, postedAt: it.postedAt, ci: d?.ci || null, draft: !!d?.draft,
         reviewers, approvers, replies: it.replies,
       });
     }

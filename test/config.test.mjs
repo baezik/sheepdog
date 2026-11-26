@@ -27,6 +27,10 @@ test('patch validates keys and values', () => {
   assert.throws(() => cfg.patchConfig({ 'alerts.quietHours.start': '25:00' }), /Invalid/);
   cfg.patchConfig({ 'slack.reviewing': ':eyes:' });
   assert.equal(cfg.getConfig().slack.reviewing, 'eyes');
+  cfg.patchConfig({ 'slack.reviewing': ' :eyes: , mag,eyes  hourglass' });
+  assert.equal(cfg.getConfig().slack.reviewing, 'eyes,mag,hourglass', 'comma/space separated, colons and duplicates dropped');
+  assert.throws(() => cfg.patchConfig({ 'slack.approved': 'white_check_mark, not an emoji!' }), /Invalid/);
+  assert.throws(() => cfg.patchConfig({ 'slack.approved': ' , ' }), /Invalid/);
 });
 
 test('secrets never reach the browser and the file is private', () => {

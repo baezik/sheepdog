@@ -42,7 +42,7 @@ export const DEFAULTS = {
     userId: '',
     channelId: '',
     channelName: '',
-    reviewing: 'eyes',
+    reviewing: 'eyes', // comma-separated emoji names; any of them counts
     approved: 'white_check_mark',
     lookbackDays: 14,
   },
@@ -114,7 +114,7 @@ const EDITABLE = {
   'board.density': ['auto', 'comfortable', 'compact'], 'board.showPrs': 'boolean',
   'tickets.pattern': 'regex', 'tickets.link': 'string',
   'github.branches': 'strings', 'github.clientId': 'string',
-  'slack.channelId': 'string', 'slack.channelName': 'string', 'slack.reviewing': 'emoji', 'slack.approved': 'emoji',
+  'slack.channelId': 'string', 'slack.channelName': 'string', 'slack.reviewing': 'emojis', 'slack.approved': 'emojis',
   'slack.lookbackDays': 'number', 'slack.userId': 'string',
 };
 
@@ -126,7 +126,11 @@ function check(type, v, key) {
     case 'number': return Number.isFinite(v) && v >= 0 && v <= 100000 ? v : bad();
     case 'string': return typeof v === 'string' && v.length <= 500 ? v.trim() : bad();
     case 'time': return typeof v === 'string' && /^([01]\d|2[0-3]):[0-5]\d$/.test(v) ? v : bad();
-    case 'emoji': return typeof v === 'string' && /^[a-z0-9_+'-]{1,60}$/.test(v.replace(/:/g, '')) ? v.replace(/:/g, '') : bad();
+    case 'emojis': { // "eyes, :mag:, hourglass" -> "eyes,mag,hourglass"
+      if (typeof v !== 'string') return bad();
+      const names = [...new Set(v.split(/[,\s]+/).map((x) => x.replace(/:/g, '').trim().toLowerCase()).filter(Boolean))];
+      return names.length && names.length <= 10 && names.every((x) => /^[a-z0-9_+'-]{1,60}$/.test(x)) ? names.join(',') : bad();
+    }
     case 'regex': try { new RegExp(v); return v; } catch { return bad(); }
     case 'strings': return Array.isArray(v) && v.length <= 10 && v.every((s) => typeof s === 'string' && /^[\w./-]{1,100}$/.test(s.trim())) ? v.map((s) => s.trim()) : bad();
     default: return bad();

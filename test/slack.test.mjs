@@ -204,3 +204,17 @@ test('team bot: bot-only manifest, switching revokes the personal token, pick yo
   assert.equal(revoked.length, 1, 'a shared bot token is never revoked');
   assert.equal(getConfig().slack.token, '');
 });
+
+test('several emoji per state, including skin tones', async () => {
+  const sl = await import('../server/slack.mjs');
+  const { updateConfig } = await import('../server/config.mjs');
+  updateConfig((c) => { c.slack.token = 'xoxp-1-test'; c.slack.channelId = 'C123'; c.slack.userId = 'UALICE'; c.slack.reviewing = 'eyes,mag'; c.slack.approved = 'white_check_mark,thumbsup'; });
+  const p15 = SLACK['conversations.history'].messages.find((m) => m.text === 'https://github.com/acme/web/pull/15');
+  p15.reactions = [{ name: 'mag', users: ['UALICE'] }, { name: 'eyes', users: ['UALICE', 'UCAROL'] }];
+  await sl.refreshSlack();
+  const pr = sl.slack.prs.find((p) => p.number === 15);
+  assert.deepEqual(pr.reviewers.map((r) => r.name).sort(), ['Alice', 'Carol'], 'either emoji counts, each person once');
+  p15.reactions.push({ name: 'thumbsup::skin-tone-3', users: ['UCAROL'] });
+  await sl.refreshSlack();
+  assert.ok(!sl.slack.prs.some((p) => p.number === 15), 'a 👍 with a skin tone approves it too');
+});
