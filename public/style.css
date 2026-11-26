@@ -330,3 +330,5 @@ select.field { padding-right: 24px; }
 /* settings gear: big enough to find */
 .btn.gear { font-size: 19px; line-height: 1; height: 28px; width: 32px; padding: 0; color: var(--text); }
 .btn.gear:hover { background: rgba(255,255,255,.1); }
+.banner.suggest { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.banner.suggest .acts { margin-left: auto; display: flex; gap: 6px; }

@@ -20,7 +20,8 @@ const CMUX_APP = [path.join('/Applications', 'cmux.app'), path.join(os.homedir()
   .map((a) => path.join(a, 'Contents', 'Resources', 'bin', 'cmux')).find((p) => existsSync(p)) || '/Applications/cmux.app/Contents/Resources/bin/cmux';
 const ITERM_APP = '/Applications/iTerm.app';
 let targets = new Map();
-let lastSurfaces = []; // `${hostId}:${pid}` -> { app: 'cmux'|'iterm', ... }
+let lastSurfaces = [];
+let matchVia = new Map(); // `${hostId}:${pid}` -> { app: 'cmux'|'iterm', ... }
 
 // cmux only lets outside programs (like Sheepdog) use its control socket in some modes, set under
 // cmux › Settings › Automation › Socket Control Mode. "cmux processes only" (the default) and "Off" block us;
@@ -122,7 +123,7 @@ async function envOf(pids) {
     const pid = Number(line.match(/^\s*(\d+)\s/)?.[1]);
     if (!pid) continue;
     res.set(pid, {
-      surface: line.match(/CMUX_SURFACE_ID=([0-9A-Fa-f-]{36})/)?.[1]?.toUpperCase() || null,
+      surface: line.match(/CMUX_(?:SURFACE|PANEL)_ID=([0-9A-Fa-f-]{36})/)?.[1]?.toUpperCase() || null,
       tmux: line.match(/\bTMUX=([^,\s]+),/)?.[1] || null,
       pane: line.match(/\bTMUX_PANE=(%\d+)/)?.[1] || null,
     });
@@ -158,6 +159,93 @@ async function cmuxIdsFromEnv(pids) {
   return res;
 }
 
+// ---------------------------------------------------------------- cmux: which tab owns a process
+// cmux starts each tab with its own `login` process, and everything in the tab (shell, ssh, tmux attach,
+// agents) descends from it. `cmux debug-terminals` gives each tab's age, so (now − age) is when the tab was
+// created: the login started within a second or two of that. Pairing them tells which tab owns any process,
+// without reading process environments (which macOS no longer allows) or relying on tab titles.
+let tabLoginCache = { key: '', map: new Map() };
+async function cmuxTabLogins(procs) {
+  const cmuxApp = [...procs.values()].find((p) => /\/cmux\.app\/Contents\/MacOS\/cmux$/.test(p.comm));
+  if (!cmuxApp) return new Map();
+  const logins = [...procs.values()].filter((p) => p.ppid === cmuxApp.pid && /(^|\/)login$/.test(p.comm));
+  if (!logins.length) return new Map();
+  const out = await cmux(['debug-terminals']).catch(() => '');
+  const now = Date.now();
+  const tabs = [];
+  for (const block of out.split(/\n(?=\[\d+\] )/)) {
+    const ref = block.match(/^\[\d+\] (surface:\d+)/)?.[1];
+    const age = Number(block.match(/\bcreated=([\d.]+)s/)?.[1]);
+    if (ref && Number.isFinite(age)) tabs.push({ ref, at: now - age * 1000 });
+  }
+  const key = `${logins.map((l) => l.pid).sort().join(',')}|${tabs.map((t) => t.ref).sort().join(',')}`;
+  if (key === tabLoginCache.key) return tabLoginCache.map;
+  const started = await run('ps', ['-o', 'pid=,lstart=', '-p', logins.map((l) => l.pid).join(',')], { env: { LC_ALL: 'C' } }).catch(() => '');
+  const loginAt = new Map();
+  for (const line of started.split('\n')) {
+    const m = line.trim().match(/^(\d+)\s+(.+)$/);
+    const t = m && Date.parse(m[2]);
+    if (t) loginAt.set(Number(m[1]), t);
+  }
+  // pair closest first; ps only has whole seconds, so allow a few seconds and take each side once
+  const pairs = [];
+  for (const t of tabs) for (const [pid, at] of loginAt) { const d = Math.abs(t.at - at); if (d < 4000) pairs.push({ ref: t.ref, pid, d }); }
+  pairs.sort((a, b) => a.d - b.d);
+  const map = new Map(), usedPid = new Set(), usedRef = new Set();
+  for (const p of pairs) if (!usedPid.has(p.pid) && !usedRef.has(p.ref)) { map.set(p.pid, p.ref); usedPid.add(p.pid); usedRef.add(p.ref); }
+  tabLoginCache = { key, map };
+  return map;
+}
+
+async function processTable() {
+  const out = await run('ps', ['-axo', 'pid=,ppid=,comm='], { timeout: 8000 }).catch(() => '');
+  const procs = new Map();
+  for (const line of out.split('\n')) {
+    const m = line.match(/^\s*(\d+)\s+(\d+)\s+(.+)$/);
+    if (m) procs.set(Number(m[1]), { pid: Number(m[1]), ppid: Number(m[2]), comm: m[3].trim() });
+  }
+  return procs;
+}
+
+// local tmux: pane shell pid -> client pids showing that session (most recent first), for every tmux server
+// socket of this user
+async function localTmuxPanes() {
+  const panes = new Map();
+  const dir = `/private/tmp/tmux-${process.getuid?.() ?? ''}`;
+  const sockets = [];
+  try { for (const f of (await import('node:fs')).readdirSync(dir)) sockets.push(path.join(dir, f)); } catch {}
+  for (const sock of sockets) {
+    const list = await run(TMUX_BIN, ['-S', sock, 'list-panes', '-a', '-F', '#{pane_pid}\t#{session_name}'], { timeout: 3000 }).catch(() => '');
+    if (!list) continue;
+    const clients = await run(TMUX_BIN, ['-S', sock, 'list-clients', '-F', '#{client_pid}\t#{client_session}\t#{client_activity}'], { timeout: 3000 }).catch(() => '');
+    const bySession = new Map();
+    for (const l of clients.split('\n')) {
+      const [pid, sess, act] = l.split('\t');
+      if (pid && sess) (bySession.get(sess) || bySession.set(sess, []).get(sess)).push([Number(act) || 0, Number(pid)]);
+    }
+    for (const l of list.split('\n')) {
+      const [pid, sess] = l.split('\t');
+      if (pid && sess) panes.set(Number(pid), (bySession.get(sess) || []).sort((a, b) => b[0] - a[0]).map((x) => x[1]));
+    }
+  }
+  return panes;
+}
+
+/** The cmux tab (surface ref) a local process lives in: walk up to the tab's login, or through tmux. */
+function tabOfProcess(pid, procs, loginTabs, tmuxPanes, depth = 0) {
+  for (let cur = pid, hops = 0; cur && cur > 1 && hops < 40; hops++) {
+    if (loginTabs.has(cur)) return loginTabs.get(cur);
+    if (tmuxPanes.has(cur) && depth === 0) {
+      for (const client of tmuxPanes.get(cur)) {
+        const t = tabOfProcess(client, procs, loginTabs, tmuxPanes, 1);
+        if (t) return t;
+      }
+    }
+    cur = procs.get(cur)?.ppid;
+  }
+  return null;
+}
+
 export async function updateTabTargets() {
   if (!IS_MAC) return;
   try {
@@ -169,7 +257,11 @@ export async function updateTabTargets() {
         (hostId === 'local' ? local : remote).push({ hostId, a });
       }
     }
-    const [cm, it, ssh] = await Promise.all([cmuxSurfaces().catch(() => []), itermSessions().catch(() => []), sshClients()]);
+    const [cm, it, ssh, procs] = await Promise.all([cmuxSurfaces().catch(() => []), itermSessions().catch(() => []), sshClients(), processTable()]);
+    const loginTabs = cm.length ? await cmuxTabLogins(procs).catch(() => new Map()) : new Map();
+    const tmuxPanes = loginTabs.size ? await localTmuxPanes().catch(() => new Map()) : new Map();
+    const byRef = new Map(cm.map((s) => [s.surface, s]));
+    const ownTab = (pid) => (loginTabs.size ? byRef.get(tabOfProcess(pid, procs, loginTabs, tmuxPanes)) : null);
     const surfaces = [...cm, ...it];
     const envIds = await cmuxIdsFromEnv([...local.map((x) => x.a.pid), ...[...ssh.values()].map((c) => c.pid)]);
     const byId = new Map(cm.filter((s) => s.id).map((s) => [String(s.id).toUpperCase(), s]));
@@ -181,41 +273,44 @@ export async function updateTabTargets() {
       return hits.length === 1 ? hits[0] : null;
     };
     const next = new Map();
+    const via = new Map(); // key -> how the tab was found (shown on hover, helps support)
+    const pick = (key, list) => { for (const [how, t] of list) if (t) { next.set(key, t); via.set(key, how); return t; } return null; };
     for (const { hostId, a } of local) {
-      const t = byId.get(envIds.get(a.pid)) || (a.tty && byTty.get(shortTty(a.tty))) || byTitle(a.title);
-      if (t) next.set(`${hostId}:${a.pid}`, t);
+      pick(`${hostId}:${a.pid}`, [['process', ownTab(a.pid)], ['env', byId.get(envIds.get(a.pid))], ['tty', a.tty && byTty.get(shortTty(a.tty))], ['title', byTitle(a.title)]]);
     }
     const unlinked = [];
     for (const x of remote) {
       const c = x.a.sshPort && ssh.get(x.a.sshPort);
-      const t = c && (byId.get(envIds.get(c.pid)) || (c.tty && byTty.get(c.tty)));
-      if (t) next.set(`${x.hostId}:${x.a.pid}`, t); else unlinked.push(x);
+      const t = c && pick(`${x.hostId}:${x.a.pid}`, [['ssh', ownTab(c.pid)], ['env', byId.get(envIds.get(c.pid))], ['tty', c.tty && byTty.get(c.tty)]]);
+      if (!t) unlinked.push(x);
     }
     // Not every tab reports a tty: if exactly one remote agent and one Codex-looking tab
     // ("<name> | <dir>") are left over, they belong together.
     const used = new Set([...next.values()].map((t) => t.id));
     const spare = surfaces.filter((s) => !used.has(s.id) && / \| [^|]+$/.test(s.title || ''));
-    if (unlinked.length === 1 && spare.length === 1) next.set(`${unlinked[0].hostId}:${unlinked[0].a.pid}`, spare[0]);
-    else for (const x of unlinked) { const t = byTitle(x.a.title); if (t) next.set(`${x.hostId}:${x.a.pid}`, t); }
+    if (unlinked.length === 1 && spare.length === 1) pick(`${unlinked[0].hostId}:${unlinked[0].a.pid}`, [['guess', spare[0]]]);
+    else for (const x of unlinked) pick(`${x.hostId}:${x.a.pid}`, [['title', byTitle(x.a.title)]]);
 
     // tabs people picked by hand ("Which tab is this agent in?") win, while that agent and tab exist
     const manual = getState().tabLinks || {};
     const alive = new Set([...local, ...remote].map((x) => `${x.hostId}:${x.a.pid}`));
     for (const [key, id] of Object.entries(manual)) {
       const t = surfaces.find((x) => x.id === id);
-      if (alive.has(key) && t) next.set(key, t);
+      if (alive.has(key) && t) { next.set(key, t); via.set(key, 'picked'); }
       else if (!alive.has(key)) { delete manual[key]; saveStateSoon(); }
     }
     lastSurfaces = surfaces;
     tabTitles.clear();
     for (const [k, t] of next) tabTitles.set(k, t.title);
     targets = next;
+    matchVia = via;
   } catch (e) {
     log('tab mapping failed:', e.message);
   }
 }
 
 export const isFocusable = (key) => targets.has(key);
+export const focusVia = (key) => matchVia.get(key) || null;
 
 /** Terminal tabs to pick from when Sheepdog can't tell which tab an agent is in. */
 export const listTabs = () => lastSurfaces.map((s) => ({ id: s.id, app: s.app, title: s.title || '', place: s.place || '' }));

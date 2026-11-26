@@ -63,6 +63,8 @@ The first run opens the setup wizard: detect agents here → pick SSH machines �
 
 **Machines**: any host in `~/.ssh/config`, or `user@host`. Needs key-based SSH (no password prompt) and `python3`. A new machine's key is trusted on first connect (like answering "yes"; a changed key is still refused), and a `RemoteCommand` / `RequestTTY` in `~/.ssh/config` (e.g. attach to tmux) is ignored for Sheepdog's connections. When a machine can't be reached, Sheepdog says why and shows the command that fixes it.
 
+**Tickets**: Sheepdog spots your team's ticket prefix in the review channel's PR titles (ignoring look-alikes such as `UTF-8`) and your tracker link in Slack posts and PR descriptions (Jira `…/browse/ABC-1`, Linear), and offers to use them with one click. Or set them in Settings › Tickets.
+
 **cmux**: Sheepdog controls cmux from outside it, so in cmux › Settings › Automation set **Socket Control Mode** to **Automation mode** (the default, "cmux processes only", blocks it; Password mode works too). Sheepdog detects a blocking mode and says so. Sheepdog pipes a small read-only script (`server/probe.py`) over SSH each poll; nothing is installed there.
 
 **GitHub**: three options:
@@ -95,6 +97,7 @@ server/probe.py       runs on each machine; lists agents, context, tokens, load
 server/terminal.mjs   cmux / iTerm2 tab mapping and focus
 server/github.mjs     auth (gh / token / device flow), repos, branches, PR state
 server/slack.mjs      auth, channel picker, PR sidebar from reactions, PR alerts
+server/tickets.mjs    suggests the ticket pattern and tracker link from PR titles and links
 server/history.mjs    statistics history (samples, answers, PR timelines) and the numbers behind 📊 Stats
 public/               board, settings, setup wizard (no build step)
 test/                 node:test, no network

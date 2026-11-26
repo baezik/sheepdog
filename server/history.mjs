@@ -104,6 +104,9 @@ export function recordPr(pr, memo, now = Date.now()) {
   return true;
 }
 
+/** Titles of every PR Sheepdog has seen (for the ticket setup suggestion). */
+export const prTitles = () => [...prs().values()].map((p) => p.title);
+
 // every PR's newest timeline, loaded from the files once
 let prIndex = null;
 function prs() {

@@ -17,6 +17,7 @@
 import { getConfig, updateConfig, getState, saveStateSoon } from './config.mjs';
 import { prDetails, github } from './github.mjs';
 import { recordPr } from './history.mjs';
+import { linksIn } from './tickets.mjs';
 import { log, sleep } from './util.mjs';
 
 export const SCOPES = ['channels:history', 'groups:history', 'channels:read', 'groups:read', 'reactions:read', 'users:read'];
@@ -35,7 +36,7 @@ export const MANIFEST_BOT = {
 };
 export const manifestUrl = (kind = 'user') => `https://api.slack.com/apps?new_app=1&manifest_json=${encodeURIComponent(JSON.stringify(kind === 'bot' ? MANIFEST_BOT : MANIFEST))}`;
 
-export const slack = { ok: false, at: 0, prs: [], error: null };
+export const slack = { ok: false, at: 0, prs: [], error: null, ticketLinks: [] };
 
 // PR alerts for the board to show as notifications: someone started reviewing / approved your PR, or a
 // teammate's PR has waited too long for a reviewer. Newest last; the page shows the ones it hasn't seen.
@@ -256,7 +257,9 @@ export async function refreshSlack() {
       }
     }
     const items = [];
+    const ticketLinks = []; // tracker links in posts and PR descriptions, for the ticket setup suggestion
     for (const m of msgs) {
+      ticketLinks.push(...linksIn(JSON.stringify([m.text, m.attachments, m.blocks])));
       if (m.subtype && !['bot_message', 'thread_broadcast'].includes(m.subtype)) continue;
       const urls = prUrlsIn(m);
       if (!urls.length) continue;
@@ -306,6 +309,7 @@ export async function refreshSlack() {
     const liveUrls = new Set();
     for (const it of byUrl.values()) {
       const d = details.get(it.url);
+      if (d?.ticketLinks) ticketLinks.push(...d.ticketLinks);
       liveUrls.add(it.url);
       const done = !!(d && (d.merged || d.state === 'CLOSED'));
       const nameOf = async (list) => Promise.all(list.map(async (x) => ({ ...x, name: await userName(x.id) })));
@@ -361,7 +365,7 @@ export async function refreshSlack() {
     st.slackReadAt = now;
     st.slackChannel = s.channelId;
     prs.sort((a, b) => b.postedAt - a.postedAt);
-    Object.assign(slack, { ok: true, at: Date.now(), prs, error: null });
+    Object.assign(slack, { ok: true, at: Date.now(), prs, error: null, ticketLinks: ticketLinks.slice(0, 300) });
   } catch (e) {
     Object.assign(slack, { ok: false, error: e.message });
     log('slack:', e.message);

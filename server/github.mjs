@@ -6,6 +6,7 @@
 //   device – "Sign in with GitHub" (OAuth device flow); needs an OAuth app client id
 import { getConfig, updateConfig } from './config.mjs';
 import { run, log } from './util.mjs';
+import { linksIn } from './tickets.mjs';
 
 const API = 'https://api.github.com';
 export const DEVICE_CLIENT_ID = process.env.SHEEPDOG_GITHUB_CLIENT_ID || '';
@@ -238,7 +239,7 @@ export async function prDetails(urls) {
       vars[`o${k}`] = p.owner; vars[`n${k}`] = p.name; vars[`p${k}`] = p.number;
       defs.push(`$o${k}: String!`, `$n${k}: String!`, `$p${k}: Int!`);
       return `x${k}: repository(owner: $o${k}, name: $n${k}) { pullRequest(number: $p${k}) {
-        state merged isDraft title url reviewDecision author { login }
+        state merged isDraft title url reviewDecision author { login } body
         reviews(states: APPROVED, first: 1) { totalCount }
         commits(last: 1) { nodes { commit { statusCheckRollup { state } } } } } }`;
     });
@@ -247,7 +248,7 @@ export async function prDetails(urls) {
       chunk.forEach((p, k) => {
         const pr = d?.[`x${k}`]?.pullRequest;
         if (pr) out.set(p.url, { state: pr.state, merged: pr.merged, draft: pr.isDraft, title: pr.title, author: pr.author?.login,
-          review: pr.reviewDecision,
+          review: pr.reviewDecision, ticketLinks: linksIn(pr.body).slice(0, 5),
           // reviewDecision stays empty on repos that don't require reviews, so also look for an approving review
           approved: pr.reviewDecision === 'APPROVED' || (pr.reviews?.totalCount > 0 && pr.reviewDecision !== 'CHANGES_REQUESTED'), ci: norm(pr.commits?.nodes?.[0]?.commit?.statusCheckRollup?.state), repo: p.name, number: p.number });
       });

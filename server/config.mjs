@@ -25,7 +25,7 @@ export const DEFAULTS = {
     prNudgeHours: 4, // a teammate's PR has had no reviewer this long (0 = off)
   },
   board: { density: 'auto', showPrs: true, showToday: true },
-  tickets: { pattern: '\\b[A-Z][A-Z0-9]{1,9}-\\d+\\b', link: '' },
+  tickets: { pattern: '\\b[A-Z][A-Z0-9]{1,9}-\\d+\\b', link: '', suggestDismissed: false },
   github: {
     auth: 'none', // none | token | gh | device
     token: '',
@@ -112,7 +112,7 @@ const EDITABLE = {
   'alerts.quietHours.start': 'time', 'alerts.quietHours.end': 'time',
   'alerts.prReview': 'boolean', 'alerts.prApproved': 'boolean', 'alerts.prNudgeHours': 'number',
   'board.density': ['auto', 'comfortable', 'compact'], 'board.showPrs': 'boolean', 'board.showToday': 'boolean',
-  'tickets.pattern': 'regex', 'tickets.link': 'string',
+  'tickets.pattern': 'regex', 'tickets.link': 'string', 'tickets.suggestDismissed': 'boolean',
   'github.branches': 'strings', 'github.clientId': 'string',
   'slack.channelId': 'string', 'slack.channelName': 'string', 'slack.reviewing': 'emojis', 'slack.approved': 'emojis',
   'slack.lookbackDays': 'number', 'slack.userId': 'string',

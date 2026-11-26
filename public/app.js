@@ -138,6 +138,7 @@ function renderBoard() {
   const board = $('board');
   const down = S.hosts.filter((h) => h.enabled && h.error && !h.ok);
   let banner = down.length ? `<div class="banner">Can't reach ${down.map((h) => `<b>${esc(h.name)}</b>`).join(', ')}: ${esc(down[0].error)}${fixHtml(down[0].fix)} <a href="#" data-act="settings" data-pane="access">Check access…</a></div>` : '';
+  banner += ticketSuggestionHtml('board');
   if (S.cmuxBlocked) banner += `<div class="banner info">cmux isn’t letting Sheepdog switch tabs yet. <a href="#" data-act="settings" data-pane="access">How to fix…</a></div>`;
   if (!agents.length) {
     board.innerHTML = `${banner}<div class="empty"><div class="pic">🐶</div><b>No agents running.</b><div>Start Claude Code, Codex, Gemini CLI or Antigravity (agy)<br>on a watched machine and it will appear here.</div></div>`;
@@ -197,7 +198,7 @@ function prAlerts(events) {
   lastPrEvent = newest;
   const al = S.settings.alerts;
   if (inQuietHours(al.quietHours)) return;
-  if (al.sound !== 'Silent') window.SheepdogSounds.play('Ding');
+  if (al.sound !== 'Silent') window.SheepdogSounds.play(al.sound); // the sound picked in Settings, like agent alerts
   if (!al.notify) return;
   for (const e of fresh.slice(-3)) {
     if (NATIVE) native({ type: 'notify', title: e.title, body: e.body, id: `pr-${e.id}`, focusKey: '', url: e.url });
@@ -596,8 +597,17 @@ function paneBoard() {
     ])}`;
 }
 
+function ticketSuggestionHtml(where) {
+  const t = S?.ticketSuggestion;
+  if (!t) return '';
+  const host = t.link ? (t.link.match(/^https?:\/\/([^/]+)/) || [])[1] : '';
+  const what = [t.pattern ? `use <b>${t.prefixes.map((p) => `${esc(p)}-…`).join(' / ')}</b> as ticket IDs` : '', t.link ? `link them to <b>${esc(host)}</b>` : ''].filter(Boolean).join(' and ');
+  return `<div class="banner info suggest"><span>🎫 Your team’s PRs mention tickets like <b>${esc(t.prefixes[0])}-123</b> (${t.prs} PRs). Should Sheepdog ${what}?</span>
+    <span class="acts"><button class="btn primary" data-act="tickets-accept">Use these</button>${where === 'board' ? '<button class="btn" data-act="tickets-dismiss">Not now</button>' : ''}</span></div>`;
+}
+
 function paneTickets() {
-  return `<div class="pane-head">Tickets</div>
+  return `<div class="pane-head">Tickets</div>${ticketSuggestionHtml('pane')}
     ${group('Ticket IDs', [
       row('Pattern', 'Regular expression, found in titles, prompts, branches and folders', field('tickets.pattern', '', 'class="field mono" style="width:220px" spellcheck="false"')),
       row('Link template', 'Makes the ticket on each card clickable. <code>{id}</code> is replaced by the ticket.', field('tickets.link', 'https://example.atlassian.net/browse/{id}', 'style="width:300px" spellcheck="false"')),
@@ -996,6 +1006,17 @@ const actions = {
   'today-open': () => { UI.statsDays = 1; actions.stats(); },
   leaderboard: () => { closeAll(); $('lbScrim').hidden = false; loadLeaderboard(); },
   'lb-days': (el) => { UI.lbDays = Number(el.dataset.days); loadLeaderboard(); },
+  'tickets-accept': async () => {
+    const t = S.ticketSuggestion;
+    if (!t) return;
+    const patch = {};
+    if (t.pattern) patch['tickets.pattern'] = t.pattern;
+    if (t.link) patch['tickets.link'] = t.link;
+    await setConfig(patch);
+    toast('Tickets set up');
+    rerender();
+  },
+  'tickets-dismiss': async () => { await setConfig({ 'tickets.suggestDismissed': true }); toast('OK. Change it any time in Settings › Tickets'); },
   'access-check': () => loadAccess(),
   'access-open': async (el) => {
     try {

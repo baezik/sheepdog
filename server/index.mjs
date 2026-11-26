@@ -7,10 +7,12 @@ import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { getConfig, publicConfig, patchConfig, updateConfig, resetConfig, CONFIG_DIR } from './config.mjs';
 import { hostState, pollAllHosts, testHost, sshConfigHosts, validSshTarget, NO_PYTHON } from './hosts.mjs';
-import { updateTabTargets, focusAgent, isFocusable, terminalsInstalled, requestAutomation, cmuxSocketMode, cmuxBlocks, CMUX_FIX, CMUX_BIN, listTabs, linkTab } from './terminal.mjs';
+import { updateTabTargets, focusAgent, isFocusable, terminalsInstalled, requestAutomation, cmuxSocketMode, cmuxBlocks, CMUX_FIX, CMUX_BIN, listTabs, linkTab, focusVia } from './terminal.mjs';
 import * as gh from './github.mjs';
 import * as sl from './slack.mjs';
 import * as history from './history.mjs';
+import { suggest as suggestTickets } from './tickets.mjs';
+import { DEFAULTS } from './config.mjs';
 import { log, loop, run } from './util.mjs';
 
 // SHEEPDOG_PORT=0 picks a free port (the Mac app does this) and reports it on stdout.
@@ -24,11 +26,29 @@ let cmuxBlocked = false;
 setInterval(async () => { cmuxBlocked = cmuxBlocks(await cmuxSocketMode().catch(() => null)); }, 30e3).unref?.();
 cmuxSocketMode().then((m) => { cmuxBlocked = cmuxBlocks(m); }, () => {});
 
+// "Use RV- tickets and link them to Jira?": only what would change, and only while the defaults are in place
+let ticketCache = { at: 0, value: null };
+function ticketSuggestion() {
+  const t = getConfig().tickets;
+  if (t.suggestDismissed) return null;
+  if (Date.now() - ticketCache.at < 60e3) return ticketCache.value;
+  // each PR once: history has every PR seen; the sidebar's are usually in it already
+  const s = suggestTickets([...new Set([...history.prTitles(), ...sl.slack.prs.map((p) => p.title)])], sl.slack.ticketLinks || []);
+  let value = null;
+  if (s) {
+    const pattern = t.pattern === DEFAULTS.tickets.pattern && s.pattern !== t.pattern ? s.pattern : null;
+    const link = !t.link && s.link ? s.link : null;
+    if (pattern || link) value = { pattern, link, prefixes: s.prefixes, prs: s.prs };
+  }
+  ticketCache = { at: Date.now(), value };
+  return value;
+}
+
 function boardState() {
   const c = getConfig();
   const hosts = c.hosts.map((h) => {
     const s = hostState.get(h.id) || {};
-    const agents = (s.agents || []).map((a) => ({ ...a, focusable: !!a.pid && isFocusable(`${h.id}:${a.pid}`) }));
+    const agents = (s.agents || []).map((a) => ({ ...a, focusable: !!a.pid && isFocusable(`${h.id}:${a.pid}`), focusVia: a.pid ? focusVia(`${h.id}:${a.pid}`) : null }));
     return { id: h.id, name: h.name, type: h.type, enabled: h.enabled, ok: !!s.ok, at: s.at || 0, error: s.error || null, fix: s.fix || null,
       hostname: s.host, ncpu: s.ncpu, load: s.load, mem: s.mem, disk: s.disk, now: s.now, agents };
   });
@@ -41,6 +61,7 @@ function boardState() {
     cmuxBlocked,
     today: c.board.showToday ? history.today(c.slack.userId) : null,
     settings: { idleMinutes: c.idleMinutes, alerts: c.alerts, board: c.board, ticketLink: c.tickets.link },
+    ticketSuggestion: ticketSuggestion(),
   };
 }
 
@@ -48,7 +69,7 @@ function boardState() {
 const routes = {
   'GET /api/state': () => boardState(),
   'GET /api/config': () => publicConfig(),
-  'POST /api/config': (b) => { patchConfig(b); return publicConfig(); },
+  'POST /api/config': (b) => { patchConfig(b); ticketCache.at = 0; return publicConfig(); },
   'POST /api/reset': async () => { await sl.disconnect(); resetConfig(); gh.disconnect(); return publicConfig(); },
 
   // statistics
