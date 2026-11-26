@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key><string>Sheepdog</string>
+  <key>CFBundleDisplayName</key><string>Sheepdog</string>
+  <key>CFBundleIdentifier</key><string>app.sheepdog.mac</string>
+  <key>CFBundleExecutable</key><string>Sheepdog</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
+  <key>CFBundleShortVersionString</key><string>__VERSION__</string>
+  <key>CFBundleVersion</key><string>__BUILD__</string>
+  <key>LSMinimumSystemVersion</key><string>13.0</string>
+  <key>LSUIElement</key><true/>
+  <key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
+  <key>NSHighResolutionCapable</key><true/>
+  <key>NSHumanReadableCopyright</key><string>Sheepdog</string>
+  <key>NSAppleEventsUsageDescription</key>
+  <string>Sheepdog switches your terminal (cmux or iTerm2) to an agent’s tab when you click it. It only reads tab titles and selects tabs; it never types into or reads your sessions.</string>
+  <key>SUFeedURL</key><string>__FEED_URL__</string>
+  <key>SUPublicEDKey</key><string>G6IAMdhCLiABMuWtVoIUJ1jmfW+slJgU0NFB96y75LQ=</string>
+  <key>SUEnableAutomaticChecks</key><true/>
+  <key>SUScheduledCheckInterval</key><integer>21600</integer>
+  <key>NSAppTransportSecurity</key>
+  <dict><key>NSAllowsLocalNetworking</key><true/></dict>
+</dict>
+</plist>

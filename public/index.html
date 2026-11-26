@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sheepdog</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🐶</text></svg>">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header>
+  <button class="btn" data-act="settings" title="Settings (⌘,)">⚙︎</button>
+  <button class="btn" data-act="branches" title="Last merge per repository">⎇ Branches</button>
+  <div class="spacer"></div>
+  <div class="hosts" id="hosts"></div>
+</header>
+<main>
+  <aside class="prside" id="prside">
+    <div class="side-head">
+      <div class="side-title"><span id="prChannel">#pr-reviews</span><span class="count" id="prCount">0</span></div>
+      <div class="seg" id="prFilter">
+        <button data-f="all" class="on">All<span></span></button>
+        <button data-f="open">Open<span></span></button>
+        <button data-f="yours">Yours<span></span></button>
+      </div>
+    </div>
+    <div class="prs" id="prs"></div>
+  </aside>
+  <div class="board" id="board"></div>
+</main>
+
+<div class="scrim" id="branchesScrim" hidden>
+  <div class="modal">
+    <div class="modal-head"><b>Last merge</b><span id="mergeAge"></span><button class="btn" data-act="close">✕</button></div>
+    <div class="mg" id="mergeGrid"></div>
+    <div class="legend"><span><span class="ok">✓</span> merged in the last hour</span><span>— nothing merged yet</span><a href="#" data-act="settings" data-pane="github">Edit repositories…</a></div>
+  </div>
+</div>
+<div class="scrim" id="settingsScrim" hidden><div class="prefs" id="prefs"></div></div>
+<div class="scrim" id="wizardScrim" hidden><div class="wizard" id="wizard"></div></div>
+<div class="toast" id="toast"></div>
+
+<script src="/sounds.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>
