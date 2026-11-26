@@ -7,7 +7,7 @@ import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { getConfig, publicConfig, patchConfig, updateConfig, resetConfig, CONFIG_DIR } from './config.mjs';
 import { hostState, pollAllHosts, testHost, sshConfigHosts, validSshTarget, NO_PYTHON } from './hosts.mjs';
-import { updateTabTargets, focusAgent, isFocusable, terminalsInstalled, requestAutomation, cmuxSocketMode, cmuxBlocks, CMUX_FIX, CMUX_BIN } from './terminal.mjs';
+import { updateTabTargets, focusAgent, isFocusable, terminalsInstalled, requestAutomation, cmuxSocketMode, cmuxBlocks, CMUX_FIX, CMUX_BIN, listTabs, linkTab } from './terminal.mjs';
 import * as gh from './github.mjs';
 import * as sl from './slack.mjs';
 import * as history from './history.mjs';
@@ -136,6 +136,11 @@ const routes = {
   },
 
   // terminal
+  'GET /api/tabs': () => listTabs(),
+  'POST /api/focus/link': (b) => {
+    if (!/^[\w.-]+:\d+$/.test(b.key || '') || typeof b.id !== 'string' || b.id.length > 200) throw new Error('bad request');
+    return linkTab(b.key, b.id);
+  },
   'POST /api/focus': (b) => (/^[\w.-]+:\d+$/.test(b.key || '') ? focusAgent(b.key) : { ok: false, error: 'bad key' }),
   'POST /api/terminal/allow': (b) => requestAutomation(b.app),
   'GET /api/terminal/cmux': async () => { const mode = await cmuxSocketMode(); return { mode, blocked: cmuxBlocks(mode), fix: CMUX_FIX }; },

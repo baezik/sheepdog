@@ -165,18 +165,54 @@ def is_wrapper(pr):
     return os.path.basename(pr["args"].split()[0]) in ("node", "bun")
 
 
-def ssh_client_port(pid):
-    """For agents started inside an ssh login: the client's source port (links it to a Mac tab)."""
-    if not IS_LINUX:
-        return None
+def proc_env(pid):
     try:
         with open(f"/proc/{pid}/environ", "rb") as f:
-            for var in f.read().split(b"\0"):
-                if var.startswith(b"SSH_CONNECTION="):
-                    return int(var.split(b"=", 1)[1].split()[1])
-    except (OSError, ValueError, IndexError):
-        pass
-    return None
+            return dict(v.split(b"=", 1) for v in f.read().split(b"\0") if b"=" in v)
+    except OSError:
+        return {}
+
+
+def env_ssh_port(env):
+    try:
+        return int(env[b"SSH_CONNECTION"].split()[1])
+    except (KeyError, ValueError, IndexError):
+        return None
+
+
+def tmux_client_pids(env):
+    """Agents inside tmux: the tmux clients (`tmux attach` processes) currently showing the agent's session,
+    most recently active first. The agent's own environment is tmux's, from whoever started tmux first."""
+    tmux, pane = env.get(b"TMUX"), env.get(b"TMUX_PANE")
+    if not tmux or not pane:
+        return []
+    sock = tmux.split(b",")[0].decode(errors="replace")
+    base = ["tmux", "-S", sock]
+    session = run(base + ["display-message", "-p", "-t", pane.decode(errors="replace"), "#{session_name}"]).strip()
+    if not session:
+        return []
+    clients = []
+    for line in run(base + ["list-clients", "-F", "#{client_pid}\t#{client_session}\t#{client_activity}"]).splitlines():
+        p = line.split("\t")
+        if len(p) == 3 and p[1] == session:
+            try:
+                clients.append((int(p[2] or 0), int(p[0])))
+            except ValueError:
+                pass
+    return [pid for _, pid in sorted(clients, reverse=True)]
+
+
+def ssh_client_port(pid):
+    """For agents started inside an ssh login: the client's source port (links it to a Mac tab). Inside tmux,
+    the port of the ssh login that is showing the agent right now."""
+    if not IS_LINUX:
+        return None
+    env = proc_env(pid)
+    for client in tmux_client_pids(env):
+        port = env_ssh_port(proc_env(client))
+        if port:
+            return port
+    return env_ssh_port(env)
 
 
 def get_cwds(pids):

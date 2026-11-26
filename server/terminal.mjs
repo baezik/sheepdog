@@ -10,7 +10,7 @@
 import os from 'node:os';
 import path from 'node:path';
 import { existsSync, readFileSync } from 'node:fs';
-import { getConfig } from './config.mjs';
+import { getConfig, getState, saveStateSoon } from './config.mjs';
 import { hostState, tabTitles } from './hosts.mjs';
 import { run, log } from './util.mjs';
 
@@ -19,7 +19,8 @@ const IS_MAC = process.platform === 'darwin';
 const CMUX_APP = [path.join('/Applications', 'cmux.app'), path.join(os.homedir(), 'Applications', 'cmux.app')]
   .map((a) => path.join(a, 'Contents', 'Resources', 'bin', 'cmux')).find((p) => existsSync(p)) || '/Applications/cmux.app/Contents/Resources/bin/cmux';
 const ITERM_APP = '/Applications/iTerm.app';
-let targets = new Map(); // `${hostId}:${pid}` -> { app: 'cmux'|'iterm', ... }
+let targets = new Map();
+let lastSurfaces = []; // `${hostId}:${pid}` -> { app: 'cmux'|'iterm', ... }
 
 // cmux only lets outside programs (like Sheepdog) use its control socket in some modes, set under
 // cmux › Settings › Automation › Socket Control Mode. "cmux processes only" (the default) and "Off" block us;
@@ -62,7 +63,7 @@ async function cmuxSurfaces() {
   for (const w of tree.windows || []) for (const ws of w.workspaces || []) for (const p of ws.panes || [])
     for (const s of p.surfaces || []) {
       if (s.type && s.type !== 'terminal') continue;
-      all.push({ app: 'cmux', window: w.ref, workspace: ws.id, surface: s.ref, id: s.id, tty: shortTty(s.tty), title: s.title,
+      all.push({ app: 'cmux', window: w.ref, workspace: ws.id, surface: s.ref, id: s.id, tty: shortTty(s.tty), title: s.title, place: ws.title,
         titles: [s.title, ws.title].map(normTitle).filter(Boolean) });
     }
   return all;
@@ -112,13 +113,47 @@ async function sshClients() {
   return res;
 }
 
-async function cmuxIdsFromEnv(pids) {
+async function envOf(pids) {
+  // pid -> { surface: CMUX_SURFACE_ID, tmux: TMUX socket, pane: TMUX_PANE }
   const res = new Map();
   if (!pids.length) return res;
   const out = await run('ps', ['-E', '-o', 'pid=,command=', '-p', pids.join(',')]).catch(() => '');
   for (const line of out.split('\n')) {
-    const m = line.match(/^\s*(\d+)\s.*CMUX_SURFACE_ID=([0-9A-Fa-f-]{36})/);
-    if (m) res.set(Number(m[1]), m[2].toUpperCase());
+    const pid = Number(line.match(/^\s*(\d+)\s/)?.[1]);
+    if (!pid) continue;
+    res.set(pid, {
+      surface: line.match(/CMUX_SURFACE_ID=([0-9A-Fa-f-]{36})/)?.[1]?.toUpperCase() || null,
+      tmux: line.match(/\bTMUX=([^,\s]+),/)?.[1] || null,
+      pane: line.match(/\bTMUX_PANE=(%\d+)/)?.[1] || null,
+    });
+  }
+  return res;
+}
+
+// tmux on this Mac (inside a cmux tab): an agent in tmux carries the cmux tab id of whoever started tmux.
+// The tab that shows it now is the one running the `tmux attach` client for its session.
+const TMUX_BIN = ['/opt/homebrew/bin/tmux', '/usr/local/bin/tmux', '/usr/bin/tmux'].find((p) => existsSync(p)) || 'tmux';
+async function tmuxClientPids(sock, pane) {
+  const base = ['-S', sock];
+  const session = (await run(TMUX_BIN, [...base, 'display-message', '-p', '-t', pane, '#{session_name}'], { timeout: 3000 }).catch(() => '')).trim();
+  if (!session) return [];
+  const out = await run(TMUX_BIN, [...base, 'list-clients', '-F', '#{client_pid}\t#{client_session}\t#{client_activity}'], { timeout: 3000 }).catch(() => '');
+  return out.split('\n').map((l) => l.split('\t')).filter((p) => p.length === 3 && p[1] === session)
+    .sort((a, b) => Number(b[2]) - Number(a[2])).map((p) => Number(p[0]));
+}
+
+async function cmuxIdsFromEnv(pids) {
+  const res = new Map();
+  const env = await envOf(pids);
+  const viaTmux = new Map(); // agent pid -> tmux client pids
+  for (const [pid, e] of env) {
+    if (e.tmux && e.pane) viaTmux.set(pid, await tmuxClientPids(e.tmux, e.pane));
+    else if (e.surface) res.set(pid, e.surface);
+  }
+  const clients = await envOf([...new Set([...viaTmux.values()].flat())]);
+  for (const [pid, list] of viaTmux) {
+    const hit = list.map((c) => clients.get(c)?.surface).find(Boolean) || env.get(pid)?.surface;
+    if (hit) res.set(pid, hit);
   }
   return res;
 }
@@ -163,6 +198,15 @@ export async function updateTabTargets() {
     if (unlinked.length === 1 && spare.length === 1) next.set(`${unlinked[0].hostId}:${unlinked[0].a.pid}`, spare[0]);
     else for (const x of unlinked) { const t = byTitle(x.a.title); if (t) next.set(`${x.hostId}:${x.a.pid}`, t); }
 
+    // tabs people picked by hand ("Which tab is this agent in?") win, while that agent and tab exist
+    const manual = getState().tabLinks || {};
+    const alive = new Set([...local, ...remote].map((x) => `${x.hostId}:${x.a.pid}`));
+    for (const [key, id] of Object.entries(manual)) {
+      const t = surfaces.find((x) => x.id === id);
+      if (alive.has(key) && t) next.set(key, t);
+      else if (!alive.has(key)) { delete manual[key]; saveStateSoon(); }
+    }
+    lastSurfaces = surfaces;
     tabTitles.clear();
     for (const [k, t] of next) tabTitles.set(k, t.title);
     targets = next;
@@ -172,6 +216,22 @@ export async function updateTabTargets() {
 }
 
 export const isFocusable = (key) => targets.has(key);
+
+/** Terminal tabs to pick from when Sheepdog can't tell which tab an agent is in. */
+export const listTabs = () => lastSurfaces.map((s) => ({ id: s.id, app: s.app, title: s.title || '', place: s.place || '' }));
+
+/** Remember that the agent `key` (host:pid) runs in tab `id`, and switch to it. */
+export async function linkTab(key, id) {
+  const t = lastSurfaces.find((x) => x.id === id);
+  if (!t) throw new Error('That tab is gone; pick again');
+  const st = getState();
+  st.tabLinks ||= {};
+  st.tabLinks[key] = id;
+  saveStateSoon();
+  targets.set(key, t);
+  tabTitles.set(key, t.title);
+  return focusAgent(key);
+}
 
 export async function focusAgent(key) {
   const t = targets.get(key);

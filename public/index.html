@@ -9,7 +9,7 @@
 </head>
 <body>
 <header>
-  <button class="btn" data-act="settings" title="Settings (⌘,)">⚙︎</button>
+  <button class="btn gear" data-act="settings" title="Settings (⌘,)" aria-label="Settings">⚙︎</button>
   <button class="btn" data-act="branches" title="Last merge per repository">⎇ Branches</button>
   <button class="btn" data-act="stats" title="Statistics: agent time, response times, tokens, PR reviews">📊 Stats</button>
   <button class="btn" data-act="leaderboard" title="How your team ranks on PRs and reviews">🏆 Leaderboards</button>
@@ -53,6 +53,12 @@
       <div class="seg" id="lbDays"><button data-act="lb-days" data-days="1">Today</button><button data-act="lb-days" data-days="7">7 days</button><button data-act="lb-days" data-days="30">30 days</button></div>
       <button class="btn" data-act="close">✕</button></div>
     <div id="lbBody"></div>
+  </div>
+</div>
+<div class="scrim" id="tabScrim" hidden>
+  <div class="modal tabpick">
+    <div class="modal-head"><b>Which tab is this agent in?</b><button class="btn" data-act="close">✕</button></div>
+    <div id="tabBody"></div>
   </div>
 </div>
 <div class="tip" id="tip" hidden></div>

@@ -121,8 +121,8 @@ function card(a) {
   const warn = pct != null && pct >= 85;
   const ctx = pct != null || tok ? `<div class="ctx ${warn ? 'warn' : ''}"><span class="bar"><i style="width:${Math.min(100, pct || 0)}%"></i></span>
       ${pct != null ? `<span class="pct">${pct}% context</span>` : ''}${pct != null && tok ? '<span>·</span>' : ''}${tok ? `<span>${tok} tokens</span>` : ''}</div>` : '';
-  return `<div class="card ${a.status} ${a.focusable ? '' : 'nofocus'}" data-act="focus" data-key="${esc(a.focusKey)}" data-ok="${a.focusable ? 1 : 0}"
-      title="${esc(a.where || '')}${a.focusable ? ' · click to open its terminal tab' : ''}">
+  return `<div class="card ${a.status} ${a.focusable ? '' : 'nofocus'}" data-act="focus" data-key="${esc(a.focusKey)}" data-ok="${a.focusable ? 1 : 0}" data-title="${esc(title)}"
+      title="${esc(a.where || '')}${a.focusable ? ' · click to open its terminal tab (⌥-click if it opens the wrong one)' : a.focusKey ? ' · click to tell Sheepdog which tab it’s in' : ''}">
     <div class="band"><span>${label}</span><span>${dur(a.since)}</span></div>
     <div class="body">
       <div class="title">${ticketHtml(a.ticket)}<span>${esc(title)}</span></div>
@@ -206,6 +206,19 @@ function prAlerts(events) {
       n.onclick = () => { window.open(e.url, '_blank', 'noopener'); n.close(); };
     }
   }
+}
+
+async function openTabPicker(key, title) {
+  UI.tabKey = key;
+  closeAll();
+  $('tabScrim').hidden = false;
+  $('tabBody').innerHTML = '<div class="note"><span class="spin"></span> Looking at your terminal tabs…</div>';
+  let tabs = [];
+  try { tabs = await api('/api/tabs'); } catch (e) { toast(e.message, true); }
+  const app = { cmux: 'cmux', iterm: 'iTerm2' };
+  $('tabBody').innerHTML = `<div class="note">Sheepdog couldn’t tell which tab ${title ? `“${esc(title)}”` : 'this agent'} runs in (this happens with tmux, or when the tab’s title doesn’t mention the agent). Pick it once and Sheepdog remembers it while the agent runs. ⌥-click a card later to change it.</div>
+    ${tabs.length ? `<div class="tablist">${tabs.map((t) => `<button data-act="tab-pick" data-id="${esc(t.id)}"><span class="tl">${esc(t.title || 'Untitled tab')}</span><span class="tp">${esc([app[t.app], t.place].filter(Boolean).join(' · '))}</span></button>`).join('')}</div>`
+      : `<div class="banner">No terminal tabs found. Is cmux or iTerm2 open, and does Sheepdog have access? <a href="#" data-act="settings" data-pane="access">Check access…</a></div>`}`;
 }
 
 async function focusAgent(key) {
@@ -971,7 +984,7 @@ function rerender() {
     if (keep && $(keep.id)) { const el = $(keep.id); el.value = keep.v; el.focus(); }
   }
 }
-function closeAll() { for (const id of ['branchesScrim', 'statsScrim', 'lbScrim', 'settingsScrim', 'wizardScrim']) $(id).hidden = true; $('tip').hidden = true; }
+function closeAll() { for (const id of ['branchesScrim', 'statsScrim', 'lbScrim', 'tabScrim', 'settingsScrim', 'wizardScrim']) $(id).hidden = true; $('tip').hidden = true; }
 
 // ---------------------------------------------------------------- actions
 const actions = {
@@ -1000,9 +1013,19 @@ const actions = {
     try { await api('/api/stats/clear', {}); UI.stats = null; UI.statsAt = 0; toast('Statistics cleared'); } catch (e) { toast(e.message, true); }
   },
   wizard: () => openWizard(),
-  focus: (el) => {
-    if (el.dataset.ok !== '1' || !el.dataset.key) { toast('No terminal tab found for this agent', true); return; }
+  focus: (el, e) => {
+    if (!el.dataset.key) { toast('This agent doesn’t run in a terminal tab', true); return; }
+    // not matched yet (or ⌥-click to correct a wrong match): let the person pick the tab
+    if (el.dataset.ok !== '1' || e?.altKey) { openTabPicker(el.dataset.key, el.dataset.title || ''); return; }
     focusAgent(el.dataset.key);
+  },
+  'tab-pick': async (el) => {
+    try {
+      const r = await api('/api/focus/link', { key: UI.tabKey, id: el.dataset.id });
+      closeAll();
+      if (!r.ok) toast(r.error || 'Could not open the tab', true); else toast('Got it. Sheepdog will remember this tab');
+      poll(true);
+    } catch (e) { toast(e.message, true); }
   },
   toggle: (el) => setConfig({ [el.dataset.key]: !get(cfg, el.dataset.key) }).then(rerender),
   play: () => window.SheepdogSounds.play(cfg.alerts.sound),
