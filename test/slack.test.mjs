@@ -218,3 +218,22 @@ test('several emoji per state, including skin tones', async () => {
   await sl.refreshSlack();
   assert.ok(!sl.slack.prs.some((p) => p.number === 15), 'a 👍 with a skin tone approves it too');
 });
+
+test('a post with several PRs gives one card per PR; one ✅ does not approve them all', async () => {
+  const sl = await import('../server/slack.mjs');
+  const { updateConfig } = await import('../server/config.mjs');
+  updateConfig((c) => { c.slack.token = 'xoxp-1-test'; c.slack.channelId = 'C123'; c.slack.userId = 'UALICE'; c.slack.reviewing = 'eyes'; c.slack.approved = 'white_check_mark'; });
+  PRS['web/21'] = { state: 'OPEN', merged: false, isDraft: false, title: 'Part 1', author: { login: 'bob' }, commits: { nodes: [] } };
+  PRS['web/22'] = { state: 'OPEN', merged: false, isDraft: false, title: 'Part 2', author: { login: 'bob' }, commits: { nodes: [] }, reviews: { totalCount: 1 } };
+  PRS['api/23'] = { state: 'OPEN', merged: false, isDraft: false, title: 'Part 3', author: { login: 'bob' }, commits: { nodes: [] } };
+  SLACK['conversations.history'].messages.push(msg({ user: 'UBOB', text: 'Three parts: <https://github.com/acme/web/pull/21> <https://github.com/acme/web/pull/22|#22> https://github.com/acme/api/pull/23',
+    reactions: [{ name: 'eyes', users: ['UCAROL'] }, { name: 'white_check_mark', users: ['UCAROL'] }], reply_count: 2, ago: 120 }));
+  await sl.refreshSlack();
+  const nums = sl.slack.prs.map((p) => p.number);
+  assert.ok(nums.includes(21) && nums.includes(23), 'every PR in the post is listed');
+  assert.equal(sl.slack.prs.find((p) => p.number === 22).status, 'approved', 'approved on GitHub: still on the card, marked done');
+  assert.equal(new Set(sl.slack.prs.filter((p) => [21, 22, 23].includes(p.number)).map((p) => p.ts)).size, 1, 'all three belong to one post');
+  const p21 = sl.slack.prs.find((p) => p.number === 21);
+  assert.deepEqual(p21.reviewers.map((r) => r.name), ['Carol'], 'the post’s 👀 shows on each of its PRs');
+  assert.equal(p21.replies, 2);
+});

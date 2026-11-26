@@ -239,6 +239,7 @@ export async function prDetails(urls) {
       defs.push(`$o${k}: String!`, `$n${k}: String!`, `$p${k}: Int!`);
       return `x${k}: repository(owner: $o${k}, name: $n${k}) { pullRequest(number: $p${k}) {
         state merged isDraft title url reviewDecision author { login }
+        reviews(states: APPROVED, first: 1) { totalCount }
         commits(last: 1) { nodes { commit { statusCheckRollup { state } } } } } }`;
     });
     try {
@@ -246,7 +247,9 @@ export async function prDetails(urls) {
       chunk.forEach((p, k) => {
         const pr = d?.[`x${k}`]?.pullRequest;
         if (pr) out.set(p.url, { state: pr.state, merged: pr.merged, draft: pr.isDraft, title: pr.title, author: pr.author?.login,
-          review: pr.reviewDecision, ci: norm(pr.commits?.nodes?.[0]?.commit?.statusCheckRollup?.state), repo: p.name, number: p.number });
+          review: pr.reviewDecision,
+          // reviewDecision stays empty on repos that don't require reviews, so also look for an approving review
+          approved: pr.reviewDecision === 'APPROVED' || (pr.reviews?.totalCount > 0 && pr.reviewDecision !== 'CHANGES_REQUESTED'), ci: norm(pr.commits?.nodes?.[0]?.commit?.statusCheckRollup?.state), repo: p.name, number: p.number });
       });
     } catch (e) { log('github pr details:', e.message); }
   }

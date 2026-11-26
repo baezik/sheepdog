@@ -241,8 +241,20 @@ export async function refreshSlack() {
     }
     const st = getState();
     st.reactionSeen ||= {};
-    const seen = st.reactionSeen;
+    st.reactionGuess ||= {};
+    const seen = st.reactionSeen, guess = st.reactionGuess;
     const now = Date.now();
+    const watching = !!st.slackReadAt && now - st.slackReadAt < 5 * 60e3 && st.slackChannel === s.channelId;
+    if (!st.slackReadAt && Object.keys(seen).length) {
+      // one-time fix for data from before estimates existed: everything found on that very first read
+      // (all stamped within its first minute) is really an estimate, dated to the post
+      const first = Math.min(...Object.values(seen));
+      for (const [k, at] of Object.entries(seen)) {
+        if (at - first > 60e3) continue;
+        seen[k] = Math.min(at, tsToMs(k.split(':')[0]));
+        guess[k] = 1;
+      }
+    }
     const items = [];
     for (const m of msgs) {
       if (m.subtype && !['bot_message', 'thread_broadcast'].includes(m.subtype)) continue;
@@ -253,23 +265,33 @@ export async function refreshSlack() {
       const users_ = (names) => [...new Set(reactions.filter((r) => names.includes(r.name.split('::')[0])).flatMap((r) => r.users || []))];
       const reviewers = users_(emojiList(s.reviewing));
       const approvers = users_(emojiList(s.approved));
+      // Slack doesn't say when a reaction was added. While Sheepdog keeps watching, "first seen" is close
+      // enough. Reactions found on the first read (or after Sheepdog was closed) happened at some unknown time
+      // since the post / the last read: date them to that and mark them estimated (st.reactionGuess).
       const since = (who, kind) => {
         const k = `${m.ts}:${kind}:${who}`;
-        if (!seen[k]) seen[k] = now;
+        if (!seen[k]) {
+          if (watching) seen[k] = now;
+          else { seen[k] = Math.max(tsToMs(m.ts), st.slackReadAt || 0); guess[k] = 1; }
+        }
         return seen[k];
       };
-      items.push({
-        ts: m.ts, url: urls[0], text: m.text, postedAt: tsToMs(m.ts), poster: m.user || null,
-        posterName: m.user ? null : m.bot_profile?.name || m.username || 'app',
-        reviewers: reviewers.map((u) => ({ id: u, since: since(u, 'r') })),
-        approvers: approvers.map((u) => ({ id: u, since: since(u, 'a') })),
-        replies: m.reply_count || 0,
-        link: s.teamUrl ? `${s.teamUrl.replace(/\/$/, '')}/archives/${s.channelId}/p${m.ts.replace('.', '')}` : null,
-      });
+      // a post can link several PRs: each is its own PR, sharing the post's reactions, replies and link
+      for (const url of urls) {
+        items.push({
+          ts: m.ts, url, siblings: urls.length, text: m.text, postedAt: tsToMs(m.ts), poster: m.user || null,
+          posterName: m.user ? null : m.bot_profile?.name || m.username || 'app',
+          reviewers: reviewers.map((u) => ({ id: u, since: since(u, 'r'), est: !!guess[`${m.ts}:r:${u}`] })),
+          approvers: approvers.map((u) => ({ id: u, since: since(u, 'a'), est: !!guess[`${m.ts}:a:${u}`] })),
+          replies: m.reply_count || 0,
+          link: s.teamUrl ? `${s.teamUrl.replace(/\/$/, '')}/archives/${s.channelId}/p${m.ts.replace('.', '')}` : null,
+        });
+      }
     }
     // forget reaction times for messages no longer in the window
     const live = new Set(items.map((i) => i.ts));
     for (const k of Object.keys(seen)) if (!live.has(k.split(':')[0])) delete seen[k];
+    for (const k of Object.keys(guess)) if (!seen[k]) delete guess[k];
     saveStateSoon();
 
     // newest message per PR wins (a PR re-posted later replaces the old post)
@@ -295,13 +317,20 @@ export async function refreshSlack() {
       const yours = !!((s.userId && it.poster === s.userId) || (author && github.viewer && author.toLowerCase() === github.viewer.toLowerCase()));
       const repo = d?.repo || m[1], number = d?.number || Number(m[2]);
       const title = d?.title || it.text.replace(/<[^>]+>/g, '').trim().slice(0, 120) || it.url;
-      if (d?.review === 'APPROVED') st.ghApproved[it.url] ||= now;
-      const approvedAt = approvers.length ? Math.min(...approvers.map((a) => a.since)) : st.ghApproved[it.url] || null;
+      if (d?.approved) st.ghApproved[it.url] ||= now;
+      // One ✅ on a post with several PRs doesn't say which PR it approves: with GitHub connected, each
+      // PR's own GitHub approval decides; otherwise (or for a single-PR post) the ✅ counts.
+      const slackDecides = it.siblings === 1 || !d;
+      const approvedAt = (slackDecides && approvers.length ? Math.min(...approvers.map((a) => a.since)) : null) || st.ghApproved[it.url] || null;
       const approved = !!approvedAt;
 
       recordPr({ url: it.url, repo, number, title, author: author || posterName, yours, postedAt: it.postedAt,
         reviewAt: reviewers.length ? Math.min(...reviewers.map((r) => r.since)) : null, approvedAt,
-        reviewers: reviewers.map((r) => r.name), approvers: approvers.map((r) => r.name), done }, st.prHistory, now);
+        reviewers: reviewers.map((r) => r.name), approvers: approvers.map((r) => r.name), done,
+        // who posted, and who reacted when ([Slack id, ms, name]): the Today strip and Leaderboards
+        by: it.poster ? [it.poster, posterName] : null,
+        // 4th field 1 = time estimated (seen on a first read), left out of pickup speed
+        rv: reviewers.map((r) => [r.id, r.since, r.name, r.est ? 1 : 0]), ap: approvers.filter((a) => a.id !== it.poster).map((a) => [a.id, a.since, a.name, a.est ? 1 : 0]) }, st.prHistory, now);
 
       // alerts: compare with what we saw last time (the first sighting only sets the baseline)
       const nudgeMs = (al.prNudgeHours || 0) * 3600e3;
@@ -316,16 +345,21 @@ export async function refreshSlack() {
       }
       st.prSeen[it.url] = { r: [...new Set([...(was?.r || []), ...reviewers.map((r) => r.id)])], a: approved, n: !!(was?.n || overdue) };
 
-      // approved, merged and closed PRs leave the sidebar
-      if (done || approved) continue;
       prs.push({
-        url: it.url, link: it.link, repo, number, title,
+        url: it.url, link: it.link, ts: it.ts, repo, number, title,
+        status: done ? (d.merged ? 'merged' : 'closed') : approved ? 'approved' : 'open',
         author: author || posterName, poster: it.poster ? posterName : null, yours, postedAt: it.postedAt, ci: d?.ci || null, draft: !!d?.draft,
         reviewers, approvers, replies: it.replies,
       });
     }
+    // The sidebar shows posts (one card per Slack post, listing its PRs). A post stays while any of its PRs
+    // is still open; its approved / merged PRs stay on the card, marked done. Counts are of open PRs.
+    const activePosts = new Set(prs.filter((p) => p.status === 'open' && !p.draft).map((p) => p.ts));
+    prs.splice(0, prs.length, ...prs.filter((p) => activePosts.has(p.ts)));
     for (const memo of [st.prSeen, st.prHistory, st.ghApproved]) for (const u of Object.keys(memo)) if (!liveUrls.has(u)) delete memo[u];
     saveStateSoon();
+    st.slackReadAt = now;
+    st.slackChannel = s.channelId;
     prs.sort((a, b) => b.postedAt - a.postedAt);
     Object.assign(slack, { ok: true, at: Date.now(), prs, error: null });
   } catch (e) {

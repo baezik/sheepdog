@@ -12,9 +12,11 @@
   <button class="btn" data-act="settings" title="Settings (⌘,)">⚙︎</button>
   <button class="btn" data-act="branches" title="Last merge per repository">⎇ Branches</button>
   <button class="btn" data-act="stats" title="Statistics: agent time, response times, tokens, PR reviews">📊 Stats</button>
+  <button class="btn" data-act="leaderboard" title="How your team ranks on PRs and reviews">🏆 Leaderboards</button>
   <div class="spacer"></div>
   <div class="hosts" id="hosts"></div>
 </header>
+<div class="today" id="today" hidden></div>
 <main>
   <aside class="prside" id="prside">
     <div class="side-head">
@@ -43,6 +45,14 @@
       <div class="seg" id="statsDays"><button data-act="stats-days" data-days="1">Today</button><button data-act="stats-days" data-days="7">7 days</button><button data-act="stats-days" data-days="30">30 days</button></div>
       <button class="btn" data-act="close">✕</button></div>
     <div id="statsBody"></div>
+  </div>
+</div>
+<div class="scrim" id="lbScrim" hidden>
+  <div class="modal lb">
+    <div class="modal-head"><b>Leaderboards</b><span id="lbRange"></span>
+      <div class="seg" id="lbDays"><button data-act="lb-days" data-days="1">Today</button><button data-act="lb-days" data-days="7">7 days</button><button data-act="lb-days" data-days="30">30 days</button></div>
+      <button class="btn" data-act="close">✕</button></div>
+    <div id="lbBody"></div>
   </div>
 </div>
 <div class="tip" id="tip" hidden></div>

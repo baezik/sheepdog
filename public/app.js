@@ -49,7 +49,7 @@ function clock(ms) {
 // ---------------------------------------------------------------- app state
 let S = null;            // /api/state
 let cfg = null;          // /api/config (secrets redacted)
-const UI = { prFilter: 'all', pane: 'pastures', hostTest: {}, sshHosts: null, newHost: '', statsDays: 7, stats: null, statsAt: 0, statsErr: '' };
+const UI = { prFilter: 'all', pane: 'pastures', hostTest: {}, sshHosts: null, newHost: '', statsDays: 7, stats: null, statsAt: 0, statsErr: '', lbDays: 7, lb: null, lbAt: 0, lbErr: '' };
 const GH = { status: null, busy: '', err: '', device: null, suggestions: null, query: '' };
 const SL = { status: null, busy: '', err: '', channels: null, query: '', members: null, meQuery: '' };
 const WZ = { step: 0, detect: null, selected: null, results: {} };
@@ -210,22 +210,47 @@ async function focusAgent(key) {
 }
 
 // ---------------------------------------------------------------- PR sidebar
-function prItem(p) {
-  // the whole card opens the PR on GitHub; the 💬 bubble opens the Slack thread
-  const who = p.yours ? 'you' : (p.poster || p.author || '').split(/\s+/)[0];
-  const ci = { ok: 'checks passing', pending: 'checks running', fail: 'checks failing' }[p.ci] || 'no checks';
-  const reviewing = p.reviewers.length > 0;
+// The sidebar shows posts: one card per Slack post (usually one ticket), listing its PRs when it has several.
+// Counts are of open PRs.
+const isActive = (p) => p.status === 'open' && !p.draft;
+function postsOf(prs) {
+  const byTs = new Map();
+  for (const p of prs) {
+    const key = p.ts || p.url;
+    if (!byTs.has(key)) byTs.set(key, { ts: key, prs: [], postedAt: p.postedAt, yours: p.yours, poster: p.poster, author: p.author, reviewers: p.reviewers, replies: p.replies, link: p.link });
+    byTs.get(key).prs.push(p);
+  }
+  return [...byTs.values()].filter((post) => post.prs.some(isActive)).sort((a, b) => b.postedAt - a.postedAt);
+}
+const openPrs = (post) => post.prs.filter(isActive).length;
+
+function postItem(post) {
+  const prs = post.prs;
+  const active = prs.filter(isActive);
+  const who = post.yours ? 'you' : (post.poster || post.author || '').split(/\s+/)[0];
+  // worst check state among the PRs still open
+  const ci = active.some((p) => p.ci === 'fail') ? 'fail' : active.some((p) => p.ci === 'pending') ? 'pending' : active.some((p) => p.ci === 'ok') ? 'ok' : '';
+  const reviewing = post.reviewers.length > 0;
+  const multi = prs.length > 1;
+  const title = (active[0] || prs[0]).title;
+  const ciWord = { ok: 'checks passing', pending: 'checks running', fail: 'checks failing' };
+  const mark = { approved: '✓ approved', merged: '✓ merged', closed: 'closed' };
+  const list = multi ? `<div class="pr-list">${prs.map((p) => `<a class="pr-item ${p.status}" href="${esc(p.url)}" target="_blank" rel="noopener" title="${esc(`${p.title} · ${ciWord[p.ci] || 'no checks'}`)}">
+      <span class="ci ${p.status === 'open' ? p.ci || '' : ''}"></span><span class="repo">${esc(p.repo)} #${p.number}</span>${mark[p.status] ? `<span class="done">${mark[p.status]}</span>` : p.draft ? '<span class="done">draft</span>' : ''}</a>`).join('')}</div>` : '';
   let foot = '';
-  if (reviewing || (p.replies && p.link)) {
-    const first = reviewing ? Math.min(...p.reviewers.map((r) => r.since)) : 0;
-    const rv = reviewing ? `<span class="pr-rv"><span class="ico">👀</span><span class="names">${esc(p.reviewers.map((r) => r.name).join(', '))} · since ${esc(clock(first))}</span></span>` : '<span></span>';
-    const bubble = p.replies && p.link ? `<a class="pr-replies" href="${esc(p.link)}" target="_blank" rel="noopener" title="Open the thread in Slack">💬 ${p.replies}</a>` : '';
+  if (reviewing || (post.replies && post.link)) {
+    const first = reviewing ? Math.min(...post.reviewers.map((r) => r.since)) : 0;
+    const rv = reviewing ? `<span class="pr-rv"><span class="ico">👀</span><span class="names">${esc(post.reviewers.map((r) => r.name).join(', '))} · since ${esc(clock(first))}</span></span>` : '<span></span>';
+    const bubble = post.replies && post.link ? `<a class="pr-replies" href="${esc(post.link)}" target="_blank" rel="noopener" title="Open the thread in Slack">💬 ${post.replies}</a>` : '';
     foot = `<div class="pr-foot">${rv}${bubble}</div>`;
   }
+  // one PR: the card opens it on GitHub; several: the card opens the Slack post, each line opens its PR
+  const main = multi ? post.link || prs[0].url : prs[0].url;
+  const tip = multi ? `${prs.length} PRs · open the post in Slack` : `${prs[0].repo} #${prs[0].number} · ${ciWord[prs[0].ci] || 'no checks'} · open on GitHub`;
   return `<div class="pr ${reviewing ? 'reviewing' : ''}">
-    <a class="pr-main" href="${esc(p.url)}" target="_blank" rel="noopener" title="${esc(`${p.repo} #${p.number} · ${ci} · open on GitHub`)}"></a>
-    <div class="pr-top"><span class="ci ${p.ci || ''}"></span><span class="who">${esc(who)}</span><span class="ago">${agoMs(p.postedAt)}</span></div>
-    <div class="pr-title">${esc(p.title)}</div>${foot}</div>`;
+    <a class="pr-main" href="${esc(main)}" target="_blank" rel="noopener" title="${esc(tip)}"></a>
+    <div class="pr-top"><span class="ci ${ci}"></span><span class="who">${esc(who)}</span>${multi ? `<span class="npr">${active.length === prs.length ? `${prs.length} PRs` : `${active.length} of ${prs.length} PRs open`}</span>` : ''}<span class="ago">${agoMs(post.postedAt)}</span></div>
+    <div class="pr-title">${esc(title)}</div>${list}${foot}</div>`;
 }
 
 function renderPrs() {
@@ -241,19 +266,19 @@ function renderPrs() {
       <button class="btn solid" data-act="settings" data-pane="slack">${sl.connected ? 'Pick a channel…' : 'Connect Slack…'}</button></div>`;
     return;
   }
-  const all = sl.prs.filter((p) => !p.draft);
-  const isOpen = (p) => !p.reviewers.length;
-  const counts = { all: all.length, open: all.filter(isOpen).length, yours: all.filter((p) => p.yours).length };
+  const posts = postsOf(sl.prs);
+  const filters = { all: () => true, open: (post) => !post.reviewers.length, yours: (post) => post.yours };
+  const sum = (list) => list.reduce((n, post) => n + openPrs(post), 0);
   for (const b of $('prFilter').querySelectorAll('button')) {
     b.classList.toggle('on', b.dataset.f === UI.prFilter);
-    b.querySelector('span').textContent = counts[b.dataset.f];
+    b.querySelector('span').textContent = sum(posts.filter(filters[b.dataset.f]));
   }
-  $('prCount').textContent = counts.all;
-  const list = (UI.prFilter === 'open' ? all.filter(isOpen) : UI.prFilter === 'yours' ? all.filter((p) => p.yours) : all)
-    .slice().sort((a, b) => b.postedAt - a.postedAt);
+  $('prCount').textContent = sum(posts);
+  $('prCount').title = `${sum(posts)} open PRs in ${posts.length} posts`;
+  const list = posts.filter(filters[UI.prFilter] || filters.all);
   let html = '';
   if (sl.error) html += `<div class="sec" style="color:#F7A2A5;font-weight:500;letter-spacing:0">${esc(sl.error)}</div>`;
-  html += list.length ? list.map(prItem).join('') : `<div class="side-empty">${sl.at ? 'Nothing here.' : '<span><span class="spin"></span> Reading the channel…</span>'}</div>`;
+  html += list.length ? list.map(postItem).join('') : `<div class="side-empty">${sl.at ? 'Nothing here.' : '<span><span class="spin"></span> Reading the channel…</span>'}</div>`;
   const top = box.scrollTop;
   box.innerHTML = html;
   box.scrollTop = top;
@@ -387,6 +412,77 @@ function renderStats() {
   body.scrollTop = top;
 }
 
+// ---------------------------------------------------------------- today strip
+function delta(cur, prev, fmt = String, word = 'vs yesterday') {
+  if (cur == null || prev == null) return '';
+  const d = cur - prev;
+  return d > 0 ? `↑${fmt(d)} ${word}` : d < 0 ? `↓${fmt(-d)} ${word}` : `same as yesterday`;
+}
+function renderToday() {
+  const box = $('today');
+  const t = S.today;
+  if (!t || !S.settings.board.showToday) { box.hidden = true; return; }
+  const slack = S.slack.connected && S.slack.channel;
+  const cell = (prio, value, ctx, label, tip) => `<div class="tt" data-p="${prio}" ${tip ? `data-tip="${esc(tip)}"` : ''}><div class="tv"><b>${value}</b>${ctx ? `<span>${ctx}</span>` : ''}</div><div class="tl">${label}</div></div>`;
+  const r = t.reviews.today;
+  const cells = [];
+  if (slack) {
+    cells.push(cell(1, t.prs.today, esc(`${delta(t.prs.today, t.prs.yesterday)}${t.prs.week ? ` · ${t.prs.week} this week` : ''}`), 'Your PRs', 'PRs you posted in the review channel today'));
+    cells.push(r ? cell(1, r.total, esc(`${r.eyes} 👀 · ${r.approved} ✅`), 'Reviews given', 'Teammates’ PRs you reacted to today with 👀 or ✅')
+      : cell(1, '—', 'who are you?', 'Reviews given', 'Pick yourself in Settings › Slack to count your reviews'));
+  }
+  cells.push(cell(2, t.reply.median == null ? '—' : hrs(t.reply.median), t.reply.median == null ? (t.reply.count ? `${t.reply.count} of 3 answers` : 'no answers yet') : `median · ${t.reply.count} answers`, 'Your reply time', 'How long agents waited before you answered them today (median)'));
+  cells.push(cell(3, hrs(t.waited.today), esc(delta(t.waited.today, t.waited.yesterday, hrs)), 'Agents waited', 'Total time agents spent waiting on you today'));
+  cells.push(cell(2, hrs(t.agent.today), esc(delta(t.agent.today, t.agent.yesterday, hrs)), 'Agent hours', 'Time your agents spent working today'));
+  if (slack) {
+    cells.push(cell(2, `${t.streak} day${t.streak === 1 ? '' : 's'}`, 'with a PR', 'Streak', 'Workdays in a row you posted at least one PR (weekends don’t break it)'));
+    cells.push(cell(4, t.team.today, esc(`in #${S.slack.channel}`), 'Team PRs today', 'PRs posted in the review channel today, by everyone'));
+  }
+  box.innerHTML = `<button class="today-in" data-act="today-open" title="Open today’s statistics">${cells.join('')}</button>`;
+  box.hidden = false;
+}
+
+// ---------------------------------------------------------------- leaderboards
+const LB_TITLES = { // title, subtitle, value format, short name for the "You:" line
+  reviewed: ['Reviews given', '👀 or ✅ on a teammate’s PR', (v) => String(v), 'reviews'],
+  posted: ['PRs posted', 'in the review channel', (v) => String(v), 'PRs posted'],
+  approved: ['Approvals given', '✅ on a teammate’s PR', (v) => String(v), 'approvals'],
+  pickup: ['Fastest pickup', 'median time from post to 👀 (2+ reviews)', (v) => hrs(v), 'pickup speed'],
+};
+async function loadLeaderboard(force) {
+  if (!force && UI.lb?.days === UI.lbDays && Date.now() - UI.lbAt < 60e3) return renderLeaderboard();
+  try { UI.lb = await api(`/api/leaderboard?days=${UI.lbDays}`); UI.lbAt = Date.now(); UI.lbErr = ''; }
+  catch (e) { UI.lbErr = e.message; }
+  renderLeaderboard();
+}
+function renderLeaderboard() {
+  for (const b of $('lbDays').querySelectorAll('button')) b.classList.toggle('on', Number(b.dataset.days) === UI.lbDays);
+  const body = $('lbBody');
+  const d = UI.lb;
+  if (!S.slack.connected || !S.slack.channel) {
+    body.innerHTML = `<div class="st-empty"><div class="pic">🏆</div><b>Leaderboards come from your team’s review channel.</b><div>Connect Slack and pick the channel where your team posts PRs.</div>
+      <button class="btn solid" data-act="settings" data-pane="slack">Connect Slack…</button></div>`;
+    return;
+  }
+  if (UI.lbErr) { body.innerHTML = `<div class="banner">${esc(UI.lbErr)}</div>`; return; }
+  if (!d || d.days !== UI.lbDays) { body.innerHTML = '<div class="st-empty"><span class="spin"></span> Counting…</div>'; return; }
+  const medal = (n) => (n === 1 ? '🥇' : n === 2 ? '🥈' : n === 3 ? '🥉' : `#${n}`);
+  const mine = d.boards.filter((b) => b.you).map((b) => `<b>${medal(b.you.rank)}</b> in ${LB_TITLES[b.key][3]}`);
+  let html = d.me
+    ? `<div class="lb-you">${mine.length ? `You: ${mine.join(' · ')}` : 'You’re not on the boards yet for this period. Post or review a PR to get on.'}</div>`
+    : '<div class="lb-you">Pick yourself in <a href="#" data-act="settings" data-pane="slack">Settings › Slack</a> to see where you rank.</div>';
+  html += '<div class="lb-grid">';
+  for (const b of d.boards) {
+    const [title, sub, fmt] = LB_TITLES[b.key];
+    const row = (r) => `<div class="lb-row ${r.you ? 'you' : ''}"><span class="lb-rank">${medal(r.rank)}</span><span class="lb-name">${esc(r.name)}${r.you ? ' <em>you</em>' : ''}</span><span class="lb-val">${esc(fmt(r.value))}</span></div>`;
+    const rows = b.rows.map(row).join('');
+    const extra = b.you && !b.rows.some((r) => r.you) ? `<div class="lb-gap">…</div>${row(b.you)}` : '';
+    html += `<div class="lb-card"><div class="lb-h"><b>${title}</b><span>${sub}</span></div>${rows || `<div class="st-note" style="padding:8px 0">${b.key === 'pickup' ? 'Fills in as Sheepdog sees new reviews start (each person needs 2).' : 'No one yet.'}</div>`}${extra}</div>`;
+  }
+  html += `</div><div class="st-note">From #${esc(S.slack.channel)}. Slack doesn’t record when a reaction was added: times count from when Sheepdog first saw it, and reactions found when Sheepdog wasn’t watching are left out of pickup speed. Everyone’s Sheepdog sees the same channel, so everyone sees the same boards.</div>`;
+  body.innerHTML = html;
+}
+
 // ---------------------------------------------------------------- settings building blocks
 const toggle = (key) => `<button class="toggle ${get(cfg, key) ? 'on' : ''}" data-act="toggle" data-key="${key}" aria-pressed="${!!get(cfg, key)}"></button>`;
 const select = (key, opts, type = 'string') => `<select class="field" data-set="${key}" data-type="${type}">${opts.map(([v, l]) =>
@@ -477,6 +573,7 @@ function paneBoard() {
     ${group('Layout', [
       row('Density', 'Compact hides the prompt and the machine line', select('board.density', [['auto', 'Automatic (compact above 10 agents)'], ['comfortable', 'Comfortable'], ['compact', 'Compact']])),
       row('PR review sidebar', 'From your Slack review channel; hidden below 640px', toggle('board.showPrs')),
+      row('Today strip', 'Your PRs, reviews given, reply time, agent hours and streak at the top', toggle('board.showToday')),
     ])}`;
 }
 
@@ -781,7 +878,7 @@ function rerender() {
     if (keep && $(keep.id)) { const el = $(keep.id); el.value = keep.v; el.focus(); }
   }
 }
-function closeAll() { for (const id of ['branchesScrim', 'statsScrim', 'settingsScrim', 'wizardScrim']) $(id).hidden = true; $('tip').hidden = true; }
+function closeAll() { for (const id of ['branchesScrim', 'statsScrim', 'lbScrim', 'settingsScrim', 'wizardScrim']) $(id).hidden = true; $('tip').hidden = true; }
 
 // ---------------------------------------------------------------- actions
 const actions = {
@@ -790,6 +887,9 @@ const actions = {
   close: () => { closeAll(); if (WZ.step !== undefined && !cfg?.setupComplete) setConfig({ setupComplete: true }); },
   branches: () => { closeAll(); $('branchesScrim').hidden = false; renderBranches(); },
   stats: () => { closeAll(); $('statsScrim').hidden = false; loadStats(); },
+  'today-open': () => { UI.statsDays = 1; actions.stats(); },
+  leaderboard: () => { closeAll(); $('lbScrim').hidden = false; loadLeaderboard(); },
+  'lb-days': (el) => { UI.lbDays = Number(el.dataset.days); loadLeaderboard(); },
   'stats-days': (el) => { UI.statsDays = Number(el.dataset.days); loadStats(); },
   'stats-clear': async () => {
     if (!confirm('Delete all Sheepdog statistics? This can’t be undone.')) return;
@@ -1065,7 +1165,9 @@ async function poll(once) {
     $('hosts').innerHTML = S.hosts.map(hostStats).join('');
     renderBoard();
     renderPrs();
+    renderToday();
     prAlerts(S.events);
+    if (!$('lbScrim').hidden && Date.now() - UI.lbAt > 60e3) loadLeaderboard(true);
     if (!$('branchesScrim').hidden) renderBranches();
     if (!$('statsScrim').hidden && Date.now() - UI.statsAt > 60e3) loadStats(true);
     if (!$('settingsScrim').hidden && UI.pane === 'pastures' && !$('prefs').contains(document.activeElement)) renderSettings();
@@ -1083,6 +1185,7 @@ function route_(r) {
   if (what === 'settings') openSettings(PANES.some(([id]) => id === pane) ? pane : undefined);
   else if (what === 'setup') openWizard();
   else if (what === 'branches') actions.branches();
+  else if (what === 'leaderboard') { if ([1, 7, 30].includes(Number(pane))) UI.lbDays = Number(pane); actions.leaderboard(); }
   else if (what === 'stats') { if ([1, 7, 30].includes(Number(pane))) UI.statsDays = Number(pane); actions.stats(); }
   else if (what === 'board') closeAll();
   history.replaceState(null, '', location.pathname);

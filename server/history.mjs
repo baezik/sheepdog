@@ -5,8 +5,10 @@
 //       a sample, once a minute: what every agent is doing. state: w working, t waiting on you, i idle
 //   {"t":ms,"e":"r","k":key,"w":seconds,"kind","host","repo","ticket","title"}
 //       you answered an agent that had waited w seconds
-//   {"t":ms,"e":"pr","url","repo","number","title","author","yours","postedAt","reviewAt","approvedAt","reviewers","approvers","done"}
-//       a PR's review timeline changed (the newest line per url wins)
+//   {"t":ms,"e":"pr","url","repo","number","title","author","yours","postedAt","reviewAt","approvedAt","reviewers","approvers","done",
+//    "by":[slackId,name],"rv":[[slackId,ms,name]...],"ap":[[slackId,ms,name]...]}
+//       a PR's review timeline changed (the newest line per url wins). PRs are also kept in memory (prIndex)
+//       so the Today strip and Leaderboards never re-read the files.
 //
 // Time is counted only while Sheepdog runs: each sample stands for one minute.
 import path from 'node:path';
@@ -40,6 +42,9 @@ export function prune(now = Date.now()) {
 export function clear() {
   try { rmSync(HISTORY_DIR, { recursive: true, force: true }); } catch {}
   statsCache.clear();
+  todayCache = null;
+  yesterdayCache = null;
+  prIndex = new Map();
 }
 
 // ---------------------------------------------------------------- recording
@@ -90,11 +95,31 @@ export function observe(hosts, now = Date.now()) {
 
 /** A PR's review timeline, written only when it changes. `memo` (url -> signature) lives in state.json. */
 export function recordPr(pr, memo, now = Date.now()) {
-  const sig = JSON.stringify([pr.reviewAt, pr.approvedAt, pr.reviewers, pr.approvers, pr.done, pr.title]);
+  const sig = JSON.stringify([2, pr.reviewAt, pr.approvedAt, pr.rv, pr.ap, pr.done, pr.title, pr.by]);
   if (memo[pr.url] === sig) return false;
   memo[pr.url] = sig;
-  append({ t: now, e: 'pr', ...pr });
+  const entry = { t: now, e: 'pr', ...pr };
+  append(entry);
+  prIndex?.set(pr.url, entry);
   return true;
+}
+
+// every PR's newest timeline, loaded from the files once
+let prIndex = null;
+function prs() {
+  if (prIndex) return prIndex;
+  prIndex = new Map();
+  let files = [];
+  try { files = readdirSync(HISTORY_DIR).filter((f) => /^\d{4}-\d\d-\d\d\.jsonl$/.test(f)).sort(); } catch {}
+  for (const f of files) {
+    let text = '';
+    try { text = readFileSync(path.join(HISTORY_DIR, f), 'utf8'); } catch { continue; }
+    for (const line of text.split('\n')) {
+      if (!line.includes('"e":"pr"')) continue;
+      try { const e = JSON.parse(line); prIndex.set(e.url, e); } catch {}
+    }
+  }
+  return prIndex;
 }
 
 // ---------------------------------------------------------------- statistics
@@ -156,7 +181,6 @@ export function stats(days = 7, now = Date.now()) {
   const agents = new Set();
   let work = 0, wait = 0, samples = 0, busySamples = 0, parallelSum = 0, peak = 0, tokens = 0, first = null;
   const responses = [];
-  const prs = new Map();
 
   for (const e of entries) {
     const inRange = e.t >= from;
@@ -196,8 +220,6 @@ export function stats(days = 7, now = Date.now()) {
       if (working) { busySamples++; parallelSum += working; peak = Math.max(peak, working); }
     } else if (e.e === 'r' && inRange) {
       responses.push(e);
-    } else if (e.e === 'pr') {
-      prs.set(e.url, e); // newest line per PR wins
     }
   }
 
@@ -207,7 +229,7 @@ export function stats(days = 7, now = Date.now()) {
   const longest = [...answered].sort((a, b) => b.w - a.w).slice(0, 5)
     .map((r) => ({ at: r.t, wait: r.w, title: r.title, repo: r.repo, ticket: r.ticket, kind: r.kind, host: r.host }));
 
-  const posted = [...prs.values()].filter((p) => p.postedAt >= from);
+  const posted = [...prs().values()].filter((p) => p.postedAt >= from);
   const toReview = posted.filter((p) => p.reviewAt).map((p) => Math.max(0, (p.reviewAt - p.postedAt) / 1000));
   const toApprove = posted.filter((p) => p.approvedAt).map((p) => Math.max(0, (p.approvedAt - p.postedAt) / 1000));
   const yours = posted.filter((p) => p.yours);
@@ -233,4 +255,115 @@ export function stats(days = 7, now = Date.now()) {
   };
   statsCache.set(days, { at: now, value });
   return value;
+}
+
+// ---------------------------------------------------------------- today strip
+const dayStart = (ms, back = 0) => { const d = new Date(ms); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() - back); return d.getTime(); };
+const weekStart = (ms) => { const d = new Date(dayStart(ms)); d.setDate(d.getDate() - ((d.getDay() + 6) % 7)); return d.getTime(); }; // Monday
+const isWeekend = (ms) => [0, 6].includes(new Date(ms).getDay());
+const within = (t, a, b) => t != null && t >= a && t < b;
+
+let todayCache = null;
+let yesterdayCache = null;
+/** The numbers in the strip at the top of the board. `me` is your Slack member id ('' if unknown). */
+export function today(me = '', now = Date.now()) {
+  if (todayCache && todayCache.me === me && now - todayCache.at < 60e3) return todayCache.value;
+  const t0 = dayStart(now), y0 = dayStart(now, 1), w0 = weekStart(now), tomorrow = dayStart(now, -1);
+  const all = [...prs().values()];
+  const mine = all.filter((p) => p.yours);
+  const count = (list, a, b) => list.filter((p) => within(p.postedAt, a, b)).length;
+
+  // reviews you gave: PRs (not yours) where you reacted 👀 or ✅ in the period
+  const given = (a, b) => {
+    let eyes = 0, approved = 0, prsTouched = 0;
+    if (!me) return null;
+    for (const p of all) {
+      if (p.yours) continue;
+      const r = (p.rv || []).some(([id, at]) => id === me && within(at, a, b));
+      const ok = (p.ap || []).some(([id, at]) => id === me && within(at, a, b));
+      eyes += r; approved += ok; prsTouched += r || ok;
+    }
+    return { total: prsTouched, eyes, approved };
+  };
+
+  // streak: workdays in a row with at least one PR of yours posted (today counts once it happens;
+  // weekends neither count nor break it)
+  const days = new Set(mine.map((p) => dayKey(p.postedAt)));
+  let streak = 0;
+  for (let back = days.has(dayKey(now)) ? 0 : 1; back < 120; back++) {
+    const d = dayStart(now, back);
+    if (isWeekend(d)) continue;
+    if (!days.has(dayKey(d))) break;
+    streak++;
+  }
+
+  const s1 = stats(1, now); // reads only today's file
+  if (yesterdayCache?.day !== dayKey(y0)) { // yesterday can't change: work it out once a day
+    const y = stats(7, now).series.at(-2) || {};
+    yesterdayCache = { day: dayKey(y0), work: y.work || 0, wait: y.wait || 0 };
+  }
+  const yesterday = yesterdayCache;
+  const value = {
+    prs: { today: count(mine, t0, tomorrow), yesterday: count(mine, y0, t0), week: count(mine, w0, tomorrow) },
+    reviews: { today: given(t0, tomorrow), yesterday: given(y0, t0) },
+    reply: { median: s1.responses.count >= 3 ? s1.responses.median : null, count: s1.responses.count },
+    waited: { today: s1.wait, yesterday: yesterday.wait },
+    agent: { today: s1.work, yesterday: yesterday.work, samples: s1.samples },
+    streak,
+    team: { today: count(all, t0, tomorrow), yesterday: count(all, y0, t0) },
+  };
+  todayCache = { at: now, me, value };
+  return value;
+}
+
+// ---------------------------------------------------------------- leaderboards
+/** Rankings from the review channel over the last `days` calendar days. */
+export function leaderboard(days = 7, me = '', now = Date.now()) {
+  days = [1, 7, 30].includes(days) ? days : 7;
+  const from = dayStart(now, days - 1);
+  const people = new Map();
+  const person = (id, name) => {
+    if (!id) return null;
+    const o = people.get(id) || { id, name: name || id, posted: 0, reviewed: 0, approved: 0, pickups: [] };
+    if (name && o.name === id) o.name = name;
+    people.set(id, o);
+    return o;
+  };
+  for (const p of prs().values()) {
+    if (within(p.postedAt, from, now + 1)) {
+      const o = p.by ? person(p.by[0], p.by[1]) : person(`gh:${p.author}`, p.author);
+      if (o) o.posted++;
+    }
+    const touched = new Map(); // id -> person, so 👀 + ✅ on one PR counts as one review
+    for (const [id, at, name, est] of p.rv || []) {
+      if (!within(at, from, now + 1)) continue;
+      const o = person(id, name);
+      touched.set(id, o);
+      if (!est && p.postedAt && at >= p.postedAt) o.pickups.push((at - p.postedAt) / 1000);
+    }
+    for (const [id, at, name] of p.ap || []) {
+      if (!within(at, from, now + 1)) continue;
+      const o = person(id, name);
+      o.approved++;
+      touched.set(id, o);
+    }
+    for (const o of touched.values()) o.reviewed++;
+  }
+  const list = [...people.values()];
+  const board = (key, value, { asc = false, min = 1 } = {}) => {
+    const ranked = list.map((o) => ({ id: o.id, name: o.name, value: value(o), you: o.id === me }))
+      .filter((r) => r.value != null && r.value >= (asc ? 0 : min))
+      .sort((a, b) => (asc ? a.value - b.value : b.value - a.value) || a.name.localeCompare(b.name));
+    ranked.forEach((r, i) => { r.rank = i && ranked[i - 1].value === r.value ? ranked[i - 1].rank : i + 1; });
+    return { key, rows: ranked.slice(0, 10), you: ranked.find((r) => r.you) || null, total: ranked.length };
+  };
+  return {
+    days, from, to: now, me: !!me,
+    boards: [
+      board('reviewed', (o) => o.reviewed),
+      board('posted', (o) => o.posted),
+      board('approved', (o) => o.approved),
+      board('pickup', (o) => (o.pickups.length >= 2 ? median(o.pickups) : null), { asc: true }),
+    ],
+  };
 }

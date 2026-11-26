@@ -3,8 +3,10 @@
 Watches Claude Code and Codex on your computer and your other machines, and tells you the moment one is waiting for you. Amber is reserved for "your turn".
 
 - **Board**: one card per agent: your turn (amber, sorted first), working (green), idle (grey, after 30 min unanswered). Cards show the ticket, title, last prompt, machine, context % and tokens. Click a card to jump to its terminal tab (cmux or iTerm2).
-- **PR sidebar**: pull requests posted in a Slack channel you pick. Newest post first, refreshed every 10 seconds. 👀 = someone is reviewing. PRs leave once approved (✅ in Slack or approved on GitHub), merged or closed.
+- **PR sidebar**: one card per post in the Slack channel you pick (usually one ticket). A post with several PRs lists them, each with its checks and ✓ when approved or merged; the card leaves once all are done. Counts are of open PRs. With several PRs in one post, each PR's own GitHub approval decides when it's done. Newest post first, refreshed every 10 seconds. 👀 = someone is reviewing. PRs leave once approved (✅ in Slack or approved on GitHub), merged or closed.
 - **Branches**: last merge per repository on the branches you track (e.g. dev / staging / main), with CI and deploy status.
+- **Today strip**: your PRs (vs yesterday, this week), reviews given, your reply time, agents waited, agent hours, your workday streak and the team's PRs today. Click it for today's stats.
+- **Leaderboards**: who gives the most reviews and approvals, posts the most PRs, and picks up PRs fastest, today / 7 days / 30 days, with you highlighted. From the review channel, so everyone sees the same boards.
 - **Stats**: agent time per day or hour, when your agents work (weekday × hour), how fast you answer waiting agents, how many run in parallel, tokens by ticket / repository / model, and PR review times (until someone reviews, until approved, who reviews most).
 - **Alerts**: notification, sound (Woof / Ding / Bleat / Silent), window flash, quiet hours. PR alerts too: someone started reviewing your PR, your PR was approved, a teammate's PR has had no reviewer for hours (click to open the PR).
 

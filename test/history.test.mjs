@@ -83,3 +83,40 @@ test('old files are pruned and clear removes everything', () => {
   h.clear();
   assert.equal(h.stats(7, T + 1).samples, 0);
 });
+
+test('today strip: your PRs, reviews given, streak over workdays, team PRs', () => {
+  h.clear();
+  const memo = {};
+  const now = T + 60 * min;
+  // the last 3 workdays before today, skipping weekends
+  const workdays = [];
+  for (let back = 1; workdays.length < 3; back++) {
+    const d = new Date(T); d.setDate(d.getDate() - back);
+    if (![0, 6].includes(d.getDay())) workdays.push(d.getTime());
+  }
+  const pr = (n, o) => h.recordPr({ url: `https://github.com/acme/web/pull/${n}`, repo: 'web', number: n, title: `PR ${n}`, author: 'x', yours: false,
+    postedAt: T, reviewers: [], approvers: [], reviewAt: null, approvedAt: null, done: false, by: ['UBOB', 'Bob'], rv: [], ap: [], ...o }, memo, now);
+  pr(1, { yours: true, by: ['UME', 'Me'] });
+  pr(2, { yours: true, by: ['UME', 'Me'], postedAt: T + 5 * min });
+  pr(3, { yours: true, by: ['UME', 'Me'], postedAt: workdays[0] });
+  pr(4, { yours: true, by: ['UME', 'Me'], postedAt: workdays[1] });
+  // a gap on workdays[2] ends the streak there
+  pr(5, { rv: [['UME', T + 10 * min, 'Me'], ['UCAROL', T + 20 * min, 'Carol']], ap: [['UME', T + 30 * min, 'Me']] });
+  pr(6, { rv: [['UME', workdays[0], 'Me']] }); // yesterday-ish, not today
+  const t = h.today('UME', now);
+  assert.equal(t.prs.today, 2);
+  assert.equal(t.streak, 3, 'today + 2 workdays before it');
+  assert.deepEqual(t.reviews.today, { total: 1, eyes: 1, approved: 1 }, '👀 and ✅ on one PR is one review');
+  assert.equal(t.team.today, 4);
+  assert.equal(h.today('', now + 61e3).reviews.today, null, 'no identity, no review count');
+});
+
+test('leaderboards rank reviews, posts, approvals and pickup speed', () => {
+  const lb = h.leaderboard(7, 'UME', T + 60 * min);
+  const board = (k) => lb.boards.find((b) => b.key === k);
+  assert.deepEqual(board('posted').rows.map((r) => [r.name, r.value, r.rank]), [['Me', 4, 1], ['Bob', 2, 2]]);
+  assert.deepEqual(board('reviewed').rows.map((r) => [r.name, r.value]), [['Me', 2], ['Carol', 1]]);
+  assert.equal(board('reviewed').you.rank, 1);
+  assert.deepEqual(board('approved').rows.map((r) => r.name), ['Me']);
+  assert.ok(board('pickup').rows.every((r) => r.value >= 0));
+});

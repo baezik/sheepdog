@@ -34,6 +34,7 @@ function boardState() {
       branchNames: c.github.branches, branches: gh.github.branches },
     slack: { connected: !!c.slack.token, channel: c.slack.channelName, ok: sl.slack.ok, at: sl.slack.at, error: sl.slack.error, prs: sl.slack.prs },
     events: sl.prEvents,
+    today: c.board.showToday ? history.today(c.slack.userId) : null,
     settings: { idleMinutes: c.idleMinutes, alerts: c.alerts, board: c.board, ticketLink: c.tickets.link },
   };
 }
@@ -47,6 +48,7 @@ const routes = {
 
   // statistics
   'GET /api/stats': (_, q) => history.stats(Number(q.get('days')) || 7),
+  'GET /api/leaderboard': (_, q) => history.leaderboard(Number(q.get('days')) || 7, getConfig().slack.userId),
   'POST /api/stats/clear': () => { history.clear(); return { ok: true }; },
 
   // machines
