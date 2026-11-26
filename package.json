@@ -1,6 +1,6 @@
 {
   "name": "sheepdog",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Watches Claude Code and Codex on your Mac and remote machines, and tells you the moment one is waiting for you.",
   "type": "module",
   "bin": {
