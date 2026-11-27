@@ -120,3 +120,19 @@ test('leaderboards rank reviews, posts, approvals and pickup speed', () => {
   assert.deepEqual(board('approved').rows.map((r) => r.name), ['Me']);
   assert.ok(board('pickup').rows.every((r) => r.value >= 0));
 });
+
+test('pickup: first 👀 or ✅, once per post, estimates left out', () => {
+  h.clear();
+  const memo = {};
+  // a Monday 10:00 post with two PRs
+  const mon = new Date(T); mon.setDate(mon.getDate() - ((mon.getDay() + 6) % 7)); mon.setHours(10, 0, 0, 0);
+  const M = mon.getTime(), now = M + 7 * 86400e3;
+  const pr = (n, o) => h.recordPr({ url: `https://github.com/acme/web/pull/${n}`, repo: 'web', number: n, title: `PR ${n}`, author: 'x', yours: false,
+    postedAt: M, reviewers: [], approvers: [], reviewAt: null, approvedAt: null, done: false, by: ['UBOB', 'Bob'], rv: [], ap: [], ...o }, memo, now);
+  pr(1, { rv: [['UCAROL', M + 10 * min, 'Carol']] });
+  pr(2, { rv: [['UCAROL', M + 10 * min, 'Carol']] }); // same post: not a second pickup
+  pr(3, { postedAt: M + 1, ap: [['UCAROL', M + 30 * min, 'Carol']] }); // ✅ without 👀 is a pickup
+  pr(4, { postedAt: M + 2, ap: [['UDAN', M + 5 * min, 'Dan', 1]], rv: [['UDAN', M + 5 * min, 'Dan', 1]] }); // estimated
+  const board = h.leaderboard(30, '', now).boards.find((b) => b.key === 'pickup');
+  assert.deepEqual(board.rows.map((r) => [r.name, r.value]), [['Carol', 20 * 60]]);
+});

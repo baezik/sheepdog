@@ -332,25 +332,35 @@ export function leaderboard(days = 7, me = '', now = Date.now()) {
     people.set(id, o);
     return o;
   };
+  const pickedUp = new Set();
   for (const p of prs().values()) {
     if (within(p.postedAt, from, now + 1)) {
       const o = p.by ? person(p.by[0], p.by[1]) : person(`gh:${p.author}`, p.author);
       if (o) o.posted++;
     }
     const touched = new Map(); // id -> person, so 👀 + ✅ on one PR counts as one review
+    const first = new Map(); // id -> [earliest reaction, estimated?]: 👀 or ✅, whichever came first
+    const react = (id, at, est) => { const f = first.get(id); if (!f || at < f[0]) first.set(id, [at, !!est]); };
     for (const [id, at, name, est] of p.rv || []) {
       if (!within(at, from, now + 1)) continue;
-      const o = person(id, name);
-      touched.set(id, o);
-      if (!est && p.postedAt && at >= p.postedAt) o.pickups.push((at - p.postedAt) / 1000);
+      touched.set(id, person(id, name));
+      react(id, at, est);
     }
-    for (const [id, at, name] of p.ap || []) {
+    for (const [id, at, name, est] of p.ap || []) {
       if (!within(at, from, now + 1)) continue;
       const o = person(id, name);
       o.approved++;
       touched.set(id, o);
+      react(id, at, est);
     }
     for (const o of touched.values()) o.reviewed++;
+    // pickup speed: once per post (a post with 3 PRs is one pickup), never from estimated times
+    for (const [id, [at, est]] of first) {
+      const key = `${id}:${p.postedAt}`;
+      if (est || !p.postedAt || at < p.postedAt || pickedUp.has(key)) continue;
+      pickedUp.add(key);
+      people.get(id).pickups.push((at - p.postedAt) / 1000);
+    }
   }
   const list = [...people.values()];
   const board = (key, value, { asc = false, min = 1 } = {}) => {
@@ -366,7 +376,7 @@ export function leaderboard(days = 7, me = '', now = Date.now()) {
       board('reviewed', (o) => o.reviewed),
       board('posted', (o) => o.posted),
       board('approved', (o) => o.approved),
-      board('pickup', (o) => (o.pickups.length >= 2 ? median(o.pickups) : null), { asc: true }),
+      board('pickup', (o) => (o.pickups.length >= (days === 1 ? 1 : 2) ? median(o.pickups) : null), { asc: true }),
     ],
   };
 }

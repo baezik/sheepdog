@@ -467,7 +467,7 @@ const LB_TITLES = { // title, subtitle, value format, short name for the "You:" 
   reviewed: ['Reviews given', '👀 or ✅ on a teammate’s PR', (v) => String(v), 'reviews'],
   posted: ['PRs posted', 'in the review channel', (v) => String(v), 'PRs posted'],
   approved: ['Approvals given', '✅ on a teammate’s PR', (v) => String(v), 'approvals'],
-  pickup: ['Fastest pickup', 'median time from post to 👀 (2+ reviews)', (v) => hrs(v), 'pickup speed'],
+  pickup: ['Fastest pickup', 'median time from post to first 👀 or ✅', (v) => hrs(v), 'pickup speed'],
 };
 async function loadLeaderboard(force) {
   if (!force && UI.lb?.days === UI.lbDays && Date.now() - UI.lbAt < 60e3) return renderLeaderboard();
@@ -497,9 +497,9 @@ function renderLeaderboard() {
     const row = (r) => `<div class="lb-row ${r.you ? 'you' : ''}"><span class="lb-rank">${medal(r.rank)}</span><span class="lb-name">${esc(r.name)}${r.you ? ' <em>you</em>' : ''}</span><span class="lb-val">${esc(fmt(r.value))}</span></div>`;
     const rows = b.rows.map(row).join('');
     const extra = b.you && !b.rows.some((r) => r.you) ? `<div class="lb-gap">…</div>${row(b.you)}` : '';
-    html += `<div class="lb-card"><div class="lb-h"><b>${title}</b><span>${sub}</span></div>${rows || `<div class="st-note" style="padding:8px 0">${b.key === 'pickup' ? 'Fills in as Sheepdog sees new reviews start (each person needs 2).' : 'No one yet.'}</div>`}${extra}</div>`;
+    html += `<div class="lb-card"><div class="lb-h"><b>${title}</b><span>${sub}</span></div>${rows || `<div class="st-note" style="padding:8px 0">${b.key === 'pickup' ? 'Fills in as Sheepdog sees new reviews start (each person needs 2 over 7 or 30 days).' : 'No one yet.'}</div>`}${extra}</div>`;
   }
-  html += `</div><div class="st-note">From #${esc(S.slack.channel)}. Slack doesn’t record when a reaction was added: times count from when Sheepdog first saw it, and reactions found when Sheepdog wasn’t watching are left out of pickup speed. Everyone’s Sheepdog sees the same channel, so everyone sees the same boards.</div>`;
+  html += `</div><div class="st-note">From #${esc(S.slack.channel)}. Slack doesn’t record when a reaction was added: times count from when Sheepdog first saw it, and reactions found when Sheepdog wasn’t watching are left out of pickup speed. Pickup speed counts once per post. Everyone’s Sheepdog sees the same channel, so everyone sees the same boards.</div>`;
   body.innerHTML = html;
 }
 
