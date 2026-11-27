@@ -1,7 +1,8 @@
 import AppKit
 
 /// The menu bar icon and its dropdown (design 1a: grouped list).
-/// Icon: 🐶 asleep when nothing needs you, amber count when agents wait, red queue when a machine is overloaded.
+/// Icon: the app icon's prompt chevron and three bars as a menu bar glyph (dimmed when nothing is running),
+/// amber count when agents wait, red queue when a machine is overloaded.
 final class StatusMenu: NSObject, NSMenuDelegate {
     private let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let menu = NSMenu()
@@ -59,13 +60,39 @@ final class StatusMenu: NSObject, NSMenuDelegate {
     }
 
     // ------------------------------------------------------------ icon
+    /// The glyph, drawn from the app icon's 120×120 design (chevron + three bars), as a template image so macOS
+    /// tints it for light and dark menu bars. `nudge` moves the chevron right (the "bark").
+    static func glyph(dimmed: Bool, nudge: CGFloat = 0) -> NSImage {
+        let k: CGFloat = 14.5 / 43 // design units -> points: the glyph's 43-unit height fills 14.5pt
+        let size = NSSize(width: 68 * k + 2, height: 18)
+        let img = NSImage(size: size, flipped: true) { _ in
+            guard let ctx = NSGraphicsContext.current?.cgContext else { return false }
+            ctx.translateBy(x: 1 - 26.5 * k, y: (18 - 43 * k) / 2 - 38.5 * k)
+            ctx.scaleBy(x: k, y: k)
+            ctx.setStrokeColor(NSColor.black.withAlphaComponent(dimmed ? 0.5 : 1).cgColor)
+            ctx.setLineCap(.round); ctx.setLineJoin(.round)
+            ctx.setLineWidth(7)
+            ctx.move(to: CGPoint(x: 30 + nudge, y: 42)); ctx.addLine(to: CGPoint(x: 48 + nudge, y: 60)); ctx.addLine(to: CGPoint(x: 30 + nudge, y: 78))
+            ctx.strokePath()
+            ctx.setLineWidth(6.5)
+            for (y, x2) in [(44.0, 90.0), (60.0, 84.0), (76.0, 78.0)] as [(CGFloat, CGFloat)] {
+                ctx.move(to: CGPoint(x: 60, y: y)); ctx.addLine(to: CGPoint(x: x2, y: y)); ctx.strokePath()
+            }
+            return true
+        }
+        img.isTemplate = true
+        img.accessibilityDescription = "Sheepdog"
+        return img
+    }
+
     private func redrawIcon() {
         guard let button = item.button, !barking else { return }
         let waiting = agents.filter { $0.status == .turn }.count
         let s = NSMutableAttributedString()
         let font = NSFont.menuBarFont(ofSize: 0)
-        let dog = waiting > 0 ? "🐶" : (agents.isEmpty || agents.allSatisfy { $0.status == .idle } ? "🐶ᶻ" : "🐶")
-        s.append(NSAttributedString(string: dog, attributes: [.font: font]))
+        let asleep = waiting == 0 && (agents.isEmpty || agents.allSatisfy { $0.status == .idle })
+        button.image = Self.glyph(dimmed: asleep)
+        button.imagePosition = .imageLeft
         if serverProblem != nil {
             s.append(NSAttributedString(string: " !", attributes: [.font: NSFont.boldSystemFont(ofSize: font.pointSize), .foregroundColor: Self.red]))
         } else {
@@ -83,17 +110,14 @@ final class StatusMenu: NSObject, NSMenuDelegate {
         button.toolTip = serverProblem ?? (waiting > 0 ? "\(waiting) agent\(waiting == 1 ? "" : "s") waiting for you" : "Sheepdog: nothing needs you")
     }
 
-    /// The icon "barks" once when a new agent turns amber.
+    /// The icon "barks" once when a new agent turns amber: the chevron jumps forward twice.
     func bark() {
         guard let button = item.button, !barking else { return }
         barking = true
-        let frames = ["🐕", "🐶", "🐕", "🐶"]
-        for (i, f) in frames.enumerated() {
+        let frames: [CGFloat] = [4, 0, 4, 0]
+        for (i, nudge) in frames.enumerated() {
             DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(180 * i)) {
-                let rest = button.attributedTitle.string.dropFirst(2)
-                let t = NSMutableAttributedString(string: f, attributes: [.font: NSFont.menuBarFont(ofSize: 0)])
-                if !rest.isEmpty { t.append(NSAttributedString(string: String(rest), attributes: [.foregroundColor: Self.amber, .font: NSFont.monospacedDigitSystemFont(ofSize: NSFont.menuBarFont(ofSize: 0).pointSize, weight: .bold)])) }
-                button.attributedTitle = t
+                button.image = Self.glyph(dimmed: false, nudge: nudge)
             }
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(180 * frames.count)) { [weak self] in

@@ -47,7 +47,9 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/app" "$APP/Contents/Reso
 cp .build/release/Sheepdog "$APP/Contents/MacOS/Sheepdog"
 sed -e "s/__VERSION__/$VERSION/" -e "s/__BUILD__/$BUILD_NUM/" -e "s#__FEED_URL__#$FEED_URL#" Info.plist > "$APP/Contents/Info.plist"
 ditto "$SPARKLE" "$APP/Contents/Frameworks/Sparkle.framework"
-cp -R "$ROOT/server" "$ROOT/public" "$ROOT/package.json" "$APP/Contents/Resources/app/"
+# runtime dependencies (the Anthropic SDK for Herder), exactly as locked
+(cd "$ROOT" && npm ci --omit=dev --no-audit --no-fund >/dev/null)
+cp -R "$ROOT/server" "$ROOT/public" "$ROOT/package.json" "$ROOT/node_modules" "$APP/Contents/Resources/app/"
 find "$APP/Contents/Resources/app" -name '__pycache__' -prune -exec rm -rf {} +
 cp "$NODE_REAL" "$APP/Contents/Resources/runtime/node"
 chmod 755 "$APP/Contents/Resources/runtime/node"

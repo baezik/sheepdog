@@ -23,8 +23,11 @@ export const DEFAULTS = {
     prReview: true, // someone started reviewing your PR
     prApproved: true, // your PR was approved
     prNudgeHours: 4, // a teammate's PR has had no reviewer this long (0 = off)
+    prRequested: true, // someone asked you to review (GitHub review source)
   },
-  board: { density: 'auto', showPrs: true, showToday: true },
+  board: { density: 'auto', showPrs: true, showToday: true, herder: true },
+  // where the PR review sidebar comes from: auto = the Slack channel if one is set up, else GitHub (when repos are picked)
+  reviews: { source: 'auto' }, // auto | slack | github
   tickets: { pattern: '\\b[A-Z][A-Z0-9]{1,9}-\\d+\\b', link: '', suggestDismissed: false },
   github: {
     auth: 'none', // none | token | gh | device
@@ -48,9 +51,12 @@ export const DEFAULTS = {
     lookbackDays: 14,
   },
   terminal: { cmuxPassword: '' },
+  // Herder, the orchestrator chat: your own model and key; confirmSends = messages it writes to agents wait for your OK
+  // provider: anthropic (Anthropic API key) | openai (any OpenAI-compatible endpoint: LiteLLM, OpenRouter, Ollama, OpenAI)
+  herder: { provider: 'anthropic', baseUrl: '', wire: 'responses', key: '', model: 'claude-opus-5-5', confirmSends: false }, // wire: responses | chat (OpenAI-compatible only)
 };
 
-const SECRET_PATHS = [['github', 'token'], ['slack', 'token'], ['terminal', 'cmuxPassword']];
+const SECRET_PATHS = [['github', 'token'], ['slack', 'token'], ['terminal', 'cmuxPassword'], ['herder', 'key']];
 
 const isObj = (v) => v && typeof v === 'object' && !Array.isArray(v);
 function merge(base, over) {
@@ -111,7 +117,7 @@ const EDITABLE = {
   'alerts.notify': 'boolean', 'alerts.sound': ['Woof', 'Ding', 'Bleat', 'Silent'], 'alerts.windowFlash': 'boolean',
   'alerts.alertAfterSeconds': 'number', 'alerts.quietHours.enabled': 'boolean',
   'alerts.quietHours.start': 'time', 'alerts.quietHours.end': 'time',
-  'alerts.prReview': 'boolean', 'alerts.prApproved': 'boolean', 'alerts.prNudgeHours': 'number',
+  'alerts.prReview': 'boolean', 'alerts.prApproved': 'boolean', 'alerts.prNudgeHours': 'number', 'alerts.prRequested': 'boolean', 'reviews.source': ['auto', 'slack', 'github'], 'herder.model': 'string', 'herder.confirmSends': 'boolean', 'board.herder': 'boolean',
   'board.density': ['auto', 'comfortable', 'compact'], 'board.showPrs': 'boolean', 'board.showToday': 'boolean',
   'tickets.pattern': 'regex', 'tickets.link': 'string', 'tickets.suggestDismissed': 'boolean',
   'github.branches': 'strings', 'github.clientId': 'string',
@@ -154,6 +160,13 @@ export function patchConfig(patch) {
       o[parts.at(-1)] = v;
     }
   });
+}
+
+/** Where the review sidebar comes from right now: 'slack' or 'github'. */
+export function reviewSource(c = getConfig()) {
+  if (c.reviews.source !== 'auto') return c.reviews.source;
+  if (c.slack.token && c.slack.channelId) return 'slack';
+  return c.github.auth !== 'none' && c.github.repos.length ? 'github' : 'slack';
 }
 
 let runtime = null;

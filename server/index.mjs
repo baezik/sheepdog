@@ -5,9 +5,11 @@ import http from 'node:http';
 import path from 'node:path';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
-import { getConfig, publicConfig, patchConfig, updateConfig, resetConfig, CONFIG_DIR } from './config.mjs';
+import { getConfig, publicConfig, patchConfig, updateConfig, resetConfig, CONFIG_DIR, reviewSource, getState, saveStateSoon } from './config.mjs';
+import { ghReviews, refreshGithubReviews } from './reviews-github.mjs';
+import * as herder from './herder.mjs';
 import { hostState, pollAllHosts, testHost, sshConfigHosts, validSshTarget, NO_PYTHON } from './hosts.mjs';
-import { updateTabTargets, focusAgent, isFocusable, terminalsInstalled, requestAutomation, cmuxSocketMode, cmuxBlocks, CMUX_FIX, CMUX_BIN, listTabs, linkTab, focusVia } from './terminal.mjs';
+import { updateTabTargets, focusAgent, isFocusable, terminalsInstalled, requestAutomation, cmuxSocketMode, cmuxBlocks, CMUX_FIX, CMUX_BIN, listTabs, linkTab, focusVia, canReply, readScreen, sendToAgent } from './terminal.mjs';
 import * as gh from './github.mjs';
 import * as sl from './slack.mjs';
 import * as history from './history.mjs';
@@ -18,8 +20,8 @@ import { log, loop, run } from './util.mjs';
 // SHEEPDOG_PORT=0 picks a free port (the Mac app does this) and reports it on stdout.
 let PORT = Number(process.env.SHEEPDOG_PORT ?? 4848);
 const PUBLIC = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
-const STATIC = { '/': 'index.html', '/app.js': 'app.js', '/style.css': 'style.css', '/sounds.js': 'sounds.js' };
-const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8' };
+const STATIC = { '/': 'index.html', '/app.js': 'app.js', '/style.css': 'style.css', '/sounds.js': 'sounds.js', '/icon.svg': 'icon.svg' };
+const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml' };
 
 // ---------------------------------------------------------------- state for the board
 let cmuxBlocked = false;
@@ -33,7 +35,8 @@ function ticketSuggestion() {
   if (t.suggestDismissed) return null;
   if (Date.now() - ticketCache.at < 60e3) return ticketCache.value;
   // each PR once: history has every PR seen; the sidebar's are usually in it already
-  const s = suggestTickets([...new Set([...history.prTitles(), ...sl.slack.prs.map((p) => p.title)])], sl.slack.ticketLinks || []);
+  const r = reviewsNow();
+  const s = suggestTickets([...new Set([...history.prTitles(), ...r.prs.map((p) => p.title)])], r.ticketLinks || []);
   let value = null;
   if (s) {
     const pattern = t.pattern === DEFAULTS.tickets.pattern && s.pattern !== t.pattern ? s.pattern : null;
@@ -44,37 +47,95 @@ function ticketSuggestion() {
   return value;
 }
 
+// The review sidebar: the Slack channel, or GitHub's open PRs (Settings › Board › Review sidebar).
+function reviewsNow(c = getConfig()) {
+  if (reviewSource(c) === 'github') {
+    return { source: 'github', ready: c.github.auth !== 'none' && c.github.repos.length > 0, label: 'Pull requests', where: `${c.github.repos.length} repo${c.github.repos.length === 1 ? '' : 's'}`,
+      ok: ghReviews.ok, at: ghReviews.at, error: ghReviews.error, prs: ghReviews.prs, ticketLinks: ghReviews.ticketLinks };
+  }
+  return { source: 'slack', ready: !!c.slack.token && !!c.slack.channelId, connected: !!c.slack.token, label: c.slack.channelName ? `#${c.slack.channelName}` : 'PR reviews',
+    where: c.slack.channelName ? `#${c.slack.channelName}` : '', ok: sl.slack.ok, at: sl.slack.at, error: sl.slack.error, prs: sl.slack.prs, ticketLinks: sl.slack.ticketLinks };
+}
+// who "you" are in review history: your Slack member, or your GitHub login with GitHub as the source
+const reviewMe = (c = getConfig()) => (reviewSource(c) === 'github' ? (c.github.login ? `gh:${c.github.login}` : '') : c.slack.userId);
+
+// Short agent numbers ("agent 3"), so an agent without a ticket can still be named. Each running agent keeps
+// its number while it runs (across restarts too); a number is reused once its agent is gone.
+function numberAgents(keys) {
+  const st = getState();
+  const nos = (st.agentNos ||= {});
+  let changed = false;
+  for (const k of Object.keys(nos)) if (!keys.includes(k)) { delete nos[k]; changed = true; }
+  const used = new Set(Object.values(nos));
+  for (const k of keys) {
+    if (nos[k]) continue;
+    let n = 1;
+    while (used.has(n)) n++;
+    nos[k] = n; used.add(n); changed = true;
+  }
+  if (changed) saveStateSoon();
+  return nos;
+}
+
 function boardState() {
   const c = getConfig();
   const hosts = c.hosts.map((h) => {
     const s = hostState.get(h.id) || {};
-    const agents = (s.agents || []).map((a) => ({ ...a, focusable: !!a.pid && isFocusable(`${h.id}:${a.pid}`), focusVia: a.pid ? focusVia(`${h.id}:${a.pid}`) : null }));
+    const agents = (s.agents || []).map((a) => ({ ...a, focusable: !!a.pid && isFocusable(`${h.id}:${a.pid}`), focusVia: a.pid ? focusVia(`${h.id}:${a.pid}`) : null, canReply: !!a.pid && canReply(`${h.id}:${a.pid}`) }));
     return { id: h.id, name: h.name, type: h.type, enabled: h.enabled, ok: !!s.ok, at: s.at || 0, error: s.error || null, fix: s.fix || null,
       hostname: s.host, ncpu: s.ncpu, load: s.load, mem: s.mem, disk: s.disk, now: s.now, agents };
   });
+  // number the agents people see (not sub-agents or headless runs); hosts that are down keep their numbers
+  const shown = (h) => h.agents.filter((a) => a.pid && !a.parent && !a.headless);
+  const down = new Set(c.hosts.filter((h) => !(hostState.get(h.id) || {}).ok).map((h) => `${h.id}:`));
+  const keep = Object.keys(getState().agentNos || {}).filter((k) => [...down].some((d) => k.startsWith(d)));
+  const nos = numberAgents([...keep, ...hosts.flatMap((h) => shown(h).map((a) => `${h.id}:${a.pid}`))]);
+  for (const h of hosts) for (const a of shown(h)) a.no = nos[`${h.id}:${a.pid}`];
   return {
     now: Date.now(), setupComplete: c.setupComplete, hosts,
     github: { connected: c.github.auth !== 'none', ok: gh.github.ok, at: gh.github.at, error: gh.github.error, viewer: gh.github.viewer,
       branchNames: c.github.branches, branches: gh.github.branches },
     slack: { connected: !!c.slack.token, channel: c.slack.channelName, ok: sl.slack.ok, at: sl.slack.at, error: sl.slack.error, prs: sl.slack.prs },
+    reviews: (({ ticketLinks, ...r }) => r)(reviewsNow(c)),
+    herder: { rev: herder.revision() },
     events: sl.prEvents,
     cmuxBlocked,
-    today: c.board.showToday ? history.today(c.slack.userId) : null,
+    today: c.board.showToday ? history.today(reviewMe(c)) : null,
     settings: { idleMinutes: c.idleMinutes, alerts: c.alerts, board: c.board, ticketLink: c.tickets.link },
     ticketSuggestion: ticketSuggestion(),
   };
 }
 
+// what Herder sees: the board's agents (not sub-agents or headless runs) and the review sidebar's PRs
+function herderAgents() {
+  const c = getConfig();
+  const out = [];
+  for (const h of boardState().hosts) for (const a of h.agents) {
+    if (a.headless || a.parent || !a.pid) continue;
+    const key = `${h.id}:${a.pid}`;
+    const since = a.stateSince || a.lastActivity || a.started || h.now || Date.now() / 1000;
+    const minutes = Math.max(0, Math.round((Date.now() / 1000 - since) / 60));
+    const state = a.state === 'working' ? 'working' : minutes >= c.idleMinutes ? 'idle' : 'your_turn';
+    out.push({ id: a.ticket || `agent ${a.no}`, key, agent_no: a.no, ticket: a.ticket || null, title: a.title || null, machine: h.name, kind: a.kind, state, minutes_in_state: minutes,
+      repo: a.repo || null, last_prompt: a.prompt || null, can_read_chat: !!a.canReply });
+  }
+  return out;
+}
+herder.useAgents(herderAgents);
+setInterval(() => { try { herder.observe(herderAgents()); } catch (e) { log('herder observe:', e.message); } }, 3000).unref?.();
+herder.usePrs(() => reviewsNow().prs.map((p) => ({ pr: `${p.repo}#${p.number}`, title: p.title, author: p.poster || p.author, yours: p.yours,
+  posted_minutes_ago: Math.round((Date.now() - p.postedAt) / 60e3), reviewers: p.reviewers.map((r) => r.name), asked: p.asked || [], url: p.url })));
+
 // ---------------------------------------------------------------- routes
 const routes = {
   'GET /api/state': () => boardState(),
   'GET /api/config': () => publicConfig(),
-  'POST /api/config': (b) => { patchConfig(b); ticketCache.at = 0; return publicConfig(); },
+  'POST /api/config': (b) => { patchConfig(b); ticketCache.at = 0; if ('reviews.source' in b) { refreshGithubReviews(); sl.refreshSlack(); } return publicConfig(); },
   'POST /api/reset': async () => { await sl.disconnect(); resetConfig(); gh.disconnect(); return publicConfig(); },
 
   // statistics
   'GET /api/stats': (_, q) => history.stats(Number(q.get('days')) || 7),
-  'GET /api/leaderboard': (_, q) => history.leaderboard(Number(q.get('days')) || 7, getConfig().slack.userId),
+  'GET /api/leaderboard': (_, q) => history.leaderboard(Number(q.get('days')) || 7, reviewMe()),
   'POST /api/stats/clear': () => { history.clear(); return { ok: true }; },
 
   // machines
@@ -163,6 +224,23 @@ const routes = {
     return linkTab(b.key, b.id);
   },
   'POST /api/focus': (b) => (/^[\w.-]+:\d+$/.test(b.key || '') ? focusAgent(b.key) : { ok: false, error: 'bad key' }),
+  'GET /api/herder': () => herder.state(),
+  'POST /api/herder/chat': async (b) => {
+    // without a key, "RV-123 do X" still goes straight to that agent
+    if (!getConfig().herder.key) {
+      const sent = await herder.direct(b.text);
+      if (sent) return sent;
+      throw new Error('Start with an agent’s ticket or number (RV-123 run the tests, agent 3 run the tests), or connect a model in Settings › Herder to ask Herder anything.');
+    }
+    return herder.chat(b.text);
+  },
+  'POST /api/herder/confirm': (b) => herder.confirm(String(b.id || ''), !!b.ok),
+  'POST /api/herder/reset': () => herder.reset(),
+  'POST /api/herder/key': (b) => herder.setKey(b.key, { provider: b.provider === 'openai' ? 'openai' : 'anthropic', baseUrl: b.baseUrl }),
+  'GET /api/herder/models': () => herder.listModels(),
+  'POST /api/herder/key/clear': () => herder.clearKey(),
+  'GET /api/screen': (_, q) => { const key = q.get('key') || ''; if (!/^[\w.-]+:\d+$/.test(key)) throw new Error('bad key'); return readScreen(key, Number(q.get('lines')) || 40); },
+  'POST /api/send': (b) => { if (!/^[\w.-]+:\d+$/.test(b.key || '')) throw new Error('bad key'); return sendToAgent(b.key, { text: b.text, press: b.press, enter: b.enter !== false }); },
   'POST /api/terminal/allow': (b) => requestAutomation(b.app),
   'GET /api/terminal/cmux': async () => { const mode = await cmuxSocketMode(); return { mode, blocked: cmuxBlocks(mode), fix: CMUX_FIX }; },
   'POST /api/terminal/cmux-password': (b) => {
@@ -189,7 +267,9 @@ const routes = {
   'POST /api/github/repos/validate': (b) => gh.validateRepo(b.repo),
   'POST /api/github/repos': (b) => {
     if (!Array.isArray(b.repos)) throw new Error('Expected repos');
-    return { repos: gh.setRepos(b.repos) };
+    const repos = gh.setRepos(b.repos);
+    if (reviewSource() === 'github') refreshGithubReviews();
+    return { repos };
   },
 
   // slack
@@ -280,4 +360,5 @@ server.listen(PORT, '127.0.0.1', () => {
   loop(updateTabTargets, 4000);
   loop(gh.refreshGithub, 60000);
   loop(sl.refreshSlack, 10000);
+  loop(() => (reviewSource() === 'github' ? refreshGithubReviews() : null), 30000);
 });

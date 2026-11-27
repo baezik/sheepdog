@@ -5,7 +5,7 @@ Everything is generic: never hardcode a company, repo, host, IP, ticket prefix o
 
 ## Layout
 
-- `server/`: Node server (no dependencies). `public/`: board UI (plain JS, no build step). `test/`: `npm test`.
+- `server/`: Node server. One runtime dependency, `@anthropic-ai/sdk` (Herder), pinned in `package-lock.json`; `build.sh` runs `npm ci --omit=dev` and bundles `node_modules`. `public/`: board UI (plain JS, no build step). `test/`: `npm test`.
 - `macos/`: Swift menu bar app. `build.sh` bundles Node + `server/` + `public/` + Sparkle into `Sheepdog.app`.
 - The Mac app runs its **own copy** of `server/` and `public/` from inside the app bundle. After any code change, rebuild:
   quit Sheepdog (`osascript -e 'quit app "Sheepdog"'`), run `macos/build.sh`, then `open macos/build/Sheepdog.app`.

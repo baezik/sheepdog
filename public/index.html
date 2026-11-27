@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Sheepdog</title>
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🐶</text></svg>">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -13,6 +13,7 @@
   <button class="btn" data-act="branches" title="Last merge per repository">⎇ Branches</button>
   <button class="btn" data-act="stats" title="Statistics: agent time, response times, tokens, PR reviews">📊 Stats</button>
   <button class="btn" data-act="leaderboard" title="How your team ranks on PRs and reviews">🏆 Leaderboards</button>
+  <button class="btn" data-act="herder-toggle" id="herderBtn" title="Herder: agents waiting for you, and a chat about your agents">&gt;☰ Herder<span class="hb" id="herderCount"></span></button>
   <div class="spacer"></div>
   <div class="hosts" id="hosts"></div>
 </header>
@@ -25,11 +26,17 @@
         <button data-f="all" class="on">All<span></span></button>
         <button data-f="open">Open<span></span></button>
         <button data-f="yours">Yours<span></span></button>
+        <button data-f="you" hidden title="Pull requests where someone asked you to review">For you<span></span></button>
       </div>
     </div>
     <div class="prs" id="prs"></div>
   </aside>
   <div class="board" id="board"></div>
+  <aside class="herder" id="herder" hidden>
+    <div class="hd-head"><b>Herder</b><span id="herderSub"></span><button class="btn" data-act="herder-reset" title="Start a new chat">New chat</button><button class="btn" data-act="herder-close" title="Hide (it comes back when an agent waits)">✕</button></div>
+    <div class="hd-scroll" id="herderScroll"><div id="herderLog"></div></div>
+    <div class="hd-input"><textarea class="field" id="herderInput" rows="2" placeholder="Talk to Herder"></textarea><button class="btn solid" data-act="herder-send" id="herderSend">↑</button></div>
+  </aside>
 </main>
 
 <div class="scrim" id="branchesScrim" hidden>
@@ -61,6 +68,25 @@
     <div id="tabBody"></div>
   </div>
 </div>
+<div class="scrim" id="replyScrim" hidden>
+  <div class="modal reply">
+    <div class="modal-head"><b id="replyTitle">Agent</b><span>live view of its tab</span><button class="btn" data-act="reply-open">Open tab</button><button class="btn" data-act="close">✕</button></div>
+    <pre class="screen" id="replyScreen"></pre>
+    <div class="keys">
+      <button class="btn" data-act="reply-key" data-text="1" title="Type 1 (picks option 1)">1</button>
+      <button class="btn" data-act="reply-key" data-text="2" title="Type 2 (picks option 2)">2</button>
+      <button class="btn" data-act="reply-key" data-text="3" title="Type 3 (picks option 3)">3</button>
+      <span class="sep"></span>
+      <button class="btn" data-act="reply-key" data-press="up" title="Arrow up">↑</button>
+      <button class="btn" data-act="reply-key" data-press="down" title="Arrow down">↓</button>
+      <button class="btn" data-act="reply-key" data-press="enter" title="Enter">⏎ Enter</button>
+      <button class="btn" data-act="reply-key" data-press="escape" title="Escape (interrupts most agents)">Esc</button>
+      <button class="btn" data-act="reply-key" data-press="shift+tab" title="Shift+Tab (Claude Code: switch mode)">⇧⇥</button>
+    </div>
+    <div class="replyrow"><input class="field wide" id="replyInput" placeholder="Type a reply and press Enter…" autocomplete="off"><button class="btn solid" data-act="reply-send">Send</button></div>
+  </div>
+</div>
+<button class="herder-fab" id="herderFab" data-act="herder-toggle" title="Herder" hidden><span class="fab-ico"><img src="/icon.svg" alt=""></span><span>Herder</span><span class="fab-n" id="herderFabN"></span></button>
 <div class="tip" id="tip" hidden></div>
 <div class="scrim" id="settingsScrim" hidden><div class="prefs" id="prefs"></div></div>
 <div class="scrim" id="wizardScrim" hidden><div class="wizard" id="wizard"></div></div>

@@ -362,6 +362,68 @@ end run`, tty]);
   return { ok: true, title: t.title };
 }
 
+// ---------------------------------------------------------------- answering an agent from the board
+// cmux can read a tab's screen and type into it, so the board can show what a waiting agent is asking and
+// send the answer without switching tabs. It works for any agent (local, over ssh, inside tmux), because it
+// is the tab itself that is read and typed into. Only cmux for now.
+export const canReply = (key) => targets.get(key)?.app === 'cmux';
+const KEYS = new Set(['enter', 'escape', 'tab', 'shift+tab', 'up', 'down', 'left', 'right', 'backspace']);
+
+function cmuxTarget(key) {
+  const t = targets.get(key);
+  if (!t) throw new Error('No terminal tab found for this agent');
+  if (t.app !== 'cmux') throw new Error('Answering from Sheepdog works in cmux tabs only');
+  return ['--workspace', t.workspace, '--surface', t.surface];
+}
+
+/** The last lines on the agent's screen (plain text), and the part of it that is the agent's question. */
+export async function readScreen(key, lines = 40, { scrollback = false } = {}) {
+  const text = (await cmux(['read-screen', ...cmuxTarget(key), ...(scrollback ? ['--scrollback'] : []), '--lines', String(Math.min(200, Math.max(5, lines)))])).replace(/\s+$/, '');
+  return { text, question: questionOf(text) };
+}
+
+// lines that are the agent's own chrome, not what it said
+const CHROME = /^\s*(✻|✢|✳|✶|└ Tip:|Tip:|Worked for|⎿\s+(Queued|Allowed)|\? for shortcuts|← for agents)/;
+/**
+ * What a waiting agent is asking: the end of its screen above the input box, without the status lines.
+ * Claude Code draws its input between two ──── rules (❯ inside); Codex has a "›" input line near the bottom.
+ * A screen without an input box (a permission dialog, say) is kept whole: the choices are the question.
+ */
+export function questionOf(text, max = 18) {
+  const lines = String(text || '').split('\n').map((l) => l.replace(/\s+$/, ''));
+  let cut = lines.length;
+  for (let i = lines.length - 2; i >= 0; i--) {
+    if (/^\s*─{10,}$/.test(lines[i]) && /^\s*[❯>]/.test(lines[i + 1])) { cut = i; break; }
+  }
+  if (cut === lines.length) {
+    for (let i = lines.length - 1; i >= Math.max(0, lines.length - 8); i--) if (/^\s*› /.test(lines[i])) { cut = i; break; }
+  }
+  const keep = lines.slice(0, cut).filter((l) => !CHROME.test(l)).map((l) => l.replace(/\s*\(turn off recaps in \/config\)/, '').replace(/^(\s*)※ recap:\s*/, '$1'));
+  while (keep.length && !keep.at(-1).trim()) keep.pop();
+  const out = keep.slice(-max);
+  while (out.length && !out[0].trim()) out.shift();
+  // the screen is indented the same throughout: drop the shared indent
+  const indent = Math.min(...out.filter((l) => l.trim()).map((l) => l.match(/^\s*/)[0].length));
+  return out.map((l) => l.slice(Number.isFinite(indent) ? indent : 0)).join('\n');
+}
+
+/** Type text into the agent's tab (then Enter unless `enter` is false), or press one of KEYS. */
+export async function sendToAgent(key, { text, press, enter = true } = {}) {
+  const at = cmuxTarget(key);
+  if (press) {
+    if (!KEYS.has(press)) throw new Error('Unknown key');
+    await cmux(['send-key', ...at, press]);
+  } else {
+    // one line, no control characters; cmux reads \n, \t … in sent text as keys, so the text goes in pieces
+    // that each end at a backslash, which keeps every backslash literal
+    const line = String(text ?? '').replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, 4000);
+    for (const piece of line.match(/[^\\]*\\|[^\\]+$/g) || []) await cmux(['send', ...at, '--', piece]);
+    if (enter) await cmux(['send-key', ...at, 'enter']);
+  }
+  log('sent to', key, press ? `key ${press}` : `${String(text ?? '').length} characters`);
+  return { ok: true };
+}
+
 /** Ask macOS for Automation permission for a terminal app (shows the system prompt once). */
 export async function requestAutomation(app) {
   if (!IS_MAC) return { ok: false, error: 'Only on macOS' };

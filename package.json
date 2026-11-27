@@ -16,5 +16,8 @@
   },
   "license": "MIT",
   "repository": "github:Baezik/sheepdog",
-  "private": true
+  "private": true,
+  "dependencies": {
+    "@anthropic-ai/sdk": "1.14.0"
+  }
 }

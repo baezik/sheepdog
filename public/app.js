@@ -116,14 +116,11 @@ function ticketHtml(t) {
 function card(a) {
   const label = { turn: 'Your turn', working: 'Working', idle: 'Idle' }[a.status];
   const title = a.title || a.prompt || `${kindName(a.kind)} in ${a.repo || '?'}`;
-  const pct = a.contextPct;
   const tok = fmtTokens(a.tokens);
-  const warn = pct != null && pct >= 85;
-  const ctx = pct != null || tok ? `<div class="ctx ${warn ? 'warn' : ''}"><span class="bar"><i style="width:${Math.min(100, pct || 0)}%"></i></span>
-      ${pct != null ? `<span class="pct">${pct}% context</span>` : ''}${pct != null && tok ? '<span>·</span>' : ''}${tok ? `<span>${tok} tokens</span>` : ''}</div>` : '';
+  const ctx = tok ? `<div class="ctx"><span>${tok} tokens</span></div>` : '';
   return `<div class="card ${a.status} ${a.focusable ? '' : 'nofocus'}" data-act="focus" data-key="${esc(a.focusKey)}" data-ok="${a.focusable ? 1 : 0}" data-title="${esc(title)}"
       title="${esc(a.where || '')}${a.focusable ? ' · click to open its terminal tab (⌥-click if it opens the wrong one)' : a.focusKey ? ' · click to tell Sheepdog which tab it’s in' : ''}">
-    <div class="band"><span>${label}</span><span>${dur(a.since)}</span></div>
+    <div class="band"><span>${a.no ? `<span class="ano" title="Agent ${a.no}: tell Herder “agent ${a.no} …”">${a.no}</span>` : ''}${label}</span>${a.canReply ? `<button class="reply" data-act="reply" data-key="${esc(a.focusKey)}" data-title="${esc(title)}" title="See what it’s asking and answer here">↩ Answer</button>` : ''}<span>${dur(a.since)}</span></div>
     <div class="body">
       <div class="title">${ticketHtml(a.ticket)}<span>${esc(title)}</span></div>
       ${a.prompt && a.prompt !== title ? `<div class="prompt">${esc(a.prompt)}</div>` : ''}
@@ -141,7 +138,7 @@ function renderBoard() {
   banner += ticketSuggestionHtml('board');
   if (S.cmuxBlocked) banner += `<div class="banner info">cmux isn’t letting Sheepdog switch tabs yet. <a href="#" data-act="settings" data-pane="access">How to fix…</a></div>`;
   if (!agents.length) {
-    board.innerHTML = `${banner}<div class="empty"><div class="pic">🐶</div><b>No agents running.</b><div>Start Claude Code, Codex, Gemini CLI or Antigravity (agy)<br>on a watched machine and it will appear here.</div></div>`;
+    board.innerHTML = `${banner}<div class="empty"><div class="pic"><img src="/icon.svg" alt="" width="64" height="64"></div><b>No agents running.</b><div>Start Claude Code, Codex, Gemini CLI or Antigravity (agy)<br>on a watched machine and it will appear here.</div></div>`;
   } else {
     const d = S.settings.board.density;
     const compact = d === 'compact' || (d === 'auto' && agents.length > 10);
@@ -222,6 +219,152 @@ async function openTabPicker(key, title) {
       : `<div class="banner">No terminal tabs found. Is cmux or iTerm2 open, and does Sheepdog have access? <a href="#" data-act="settings" data-pane="access">Check access…</a></div>`}`;
 }
 
+// ---------------------------------------------------------------- Herder
+// A chat with the orchestrator, nothing else. Herder posts there when an agent starts waiting (ticket, what it
+// asks, buttons to answer or open its tab); ticket IDs in its replies are chips you can click. The panel opens
+// by itself when an agent starts waiting; closed, it's a floating button at the bottom right.
+const HD = { open: false, closedFor: '', state: null, rev: -1, sending: false };
+const turnAgents = () => (S ? agentsOf(S).filter((a) => a.status === 'turn' && a.focusKey) : []);
+const turnSig = () => turnAgents().map((a) => a.focusKey).sort().join(',');
+
+function renderHerder() {
+  const waiting = turnAgents();
+  const n = waiting.length ? String(waiting.length) : '';
+  $('herderCount').textContent = n;
+  $('herderFabN').textContent = n;
+  const sig = turnSig();
+  // a new agent waiting opens the panel; closing it keeps it closed until another agent starts waiting
+  if (S.settings.board.herder && waiting.length && !HD.open && !sig.split(',').every((k) => HD.closedFor.split(',').includes(k))) HD.open = true;
+  // a hidden panel loses its scroll position: when it opens again, draw it fresh at the newest message
+  if (HD.open && $('herder').hidden) { HD.html = ''; HD.count = 0; }
+  $('herder').hidden = !HD.open;
+  $('herderFab').hidden = HD.open;
+  $('herderFab').classList.toggle('waiting', !!waiting.length);
+  $('herderBtn').classList.toggle('on', HD.open);
+  $('herderSub').textContent = waiting.length ? `${waiting.length} waiting on you` : 'nothing waiting';
+  const rev = S.herder?.rev ?? 0;
+  if (HD.open && rev !== HD.rev && !HD.sending) {
+    HD.rev = rev;
+    api('/api/herder').then((st) => { HD.state = st; renderHerderLog(); }).catch(() => {});
+  } else if (HD.open) renderHerderLog(); // agent states (chip colours) change without the chat changing
+}
+
+// agents by ticket, for chips: the one waiting on you wins when a ticket has several
+function agentByTicket() {
+  const m = new Map();
+  const rank = { turn: 0, working: 1, idle: 2 };
+  for (const a of S ? agentsOf(S) : []) {
+    if (!a.ticket || !a.focusKey) continue;
+    const t = a.ticket.toUpperCase();
+    if (!m.has(t) || rank[a.status] < rank[m.get(t).status]) m.set(t, a);
+  }
+  return m;
+}
+const chip = (a, label) => `<button class="tchip ${a.status}" data-act="tchip" data-key="${esc(a.focusKey)}" data-title="${esc(a.title || '')}" data-reply="${a.canReply ? 1 : 0}" title="${esc(`${a.title || ''} · ${a.hostName} · ${{ turn: 'waiting on you', working: 'working', idle: 'idle' }[a.status]}`)}"><i></i>${esc(label)}</button>`;
+function richText(text) {
+  const byT = agentByTicket();
+  const byNo = new Map((S ? agentsOf(S) : []).filter((a) => a.no && a.focusKey).map((a) => [a.no, a]));
+  let h = esc(text).replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>').replace(/`([^`]+)`/g, '<code>$1</code>').replace(/\n/g, '<br>');
+  // ticket IDs and "agent 3" of known agents become chips
+  h = h.replace(/\b([A-Z][A-Z0-9]{1,9}-\d+)\b/g, (m) => (byT.has(m) ? chip(byT.get(m), m) : m));
+  return h.replace(/\b[Aa]gent #?(\d{1,4})\b/g, (m, n) => (byNo.has(Number(n)) ? chip(byNo.get(Number(n)), `agent ${n}`) : m));
+}
+
+function renderHerderLog() {
+  const st = HD.state;
+  const box = $('herderLog');
+  if (!st) { box.innerHTML = ''; HD.html = ''; return; }
+  const byKey = new Map((S ? agentsOf(S) : []).map((a) => [a.focusKey, a]));
+  let html = '';
+  if (!st.log.length) html += `<div class="hd-empty"><img src="/icon.svg" alt="" width="40" height="40"><b>Herder</b><span>I’ll tell you here when an agent needs you.${st.configured ? ' Ask me anything about your agents, or tell one what to do (by ticket, or “agent 3”).' : ` Type <b>RV-123</b> or <b>agent 3</b> and a message to send it to that agent. To ask me questions, connect a model in <a href="#" data-act="settings" data-pane="herder">Settings › Herder</a>.`}</span></div>`;
+  for (const m of st.log) {
+    if (m.role === 'you') { html += `<div class="hm you">${esc(m.text)}</div>`; continue; }
+    if (m.role === 'note') { html += `<div class="hm note">${esc(m.text)}</div>`; continue; }
+    if (m.wait) {
+      const w = m.wait;
+      const a = byKey.get(w.key);
+      const tag = w.ticket || (w.no ? `agent ${w.no}` : '');
+      const name = tag ? (a ? chip(a, tag) : `<span class="tchip"><i></i>${esc(tag)}</span>`) : '';
+      html += `<div class="hm herder wait ${w.done ? 'done' : ''}"><span class="hd-ico"><img src="/icon.svg" alt=""></span><div class="hw">
+        <div class="hw-head">${name}<b>${esc(w.title || 'An agent')}</b><span>${esc([w.machine, kindName(w.kind)].filter(Boolean).join(' · '))}</span></div>
+        <div class="hw-q">${w.done ? '✓ Answered' : m.text ? richText(m.text) : 'is waiting for you…'}</div>
+        ${!w.done && a ? `<div class="hw-acts">${a.canReply ? `<button class="btn" data-act="tchip" data-key="${esc(w.key)}" data-title="${esc(w.title || '')}" data-reply="1">↩ Answer</button>` : ''}<button class="btn" data-act="hd-open" data-key="${esc(w.key)}">Open tab ↗</button></div>` : ''}
+      </div></div>`;
+      continue;
+    }
+    html += `<div class="hm herder"><span class="hd-ico"><img src="/icon.svg" alt=""></span><div>${richText(m.text)}</div></div>`;
+    for (const sd of m.sends || []) {
+      const acts = sd.state === 'pending' ? `<span class="acts"><button class="btn primary" data-act="herder-confirm" data-id="${esc(sd.id)}" data-ok="1">Send</button><button class="btn" data-act="herder-confirm" data-id="${esc(sd.id)}" data-ok="0">Cancel</button></span>`
+        : `<span class="hs-state">${sd.state === 'sent' ? '✓ sent' : 'cancelled'}</span>`;
+      html += `<div class="hsend ${sd.state}"><div class="hs-to">Message to ${(([t, ...rest]) => `${richText(t)} ${esc(rest.join(' · '))}`)(sd.label.split(' · '))}</div><div class="hs-text">${esc(sd.text)}</div>${acts}</div>`;
+    }
+  }
+  if (HD.sending) html += '<div class="hm note"><span class="spin"></span> Herder is looking…</div>';
+  if (HD.html === html) return; // nothing changed: leave the chat (and where you are in it) alone
+  HD.html = html;
+  // keep your place: follow new messages to the bottom when you were at the bottom (or something was added),
+  // otherwise put the scroll back exactly where it was (WebKit can reset it while the content is replaced)
+  const sc = $('herderScroll');
+  const prev = sc.scrollTop;
+  const atBottom = sc.scrollHeight - prev - sc.clientHeight < 40;
+  const grew = st.log.length + (HD.sending ? 1 : 0) > (HD.count ?? 0);
+  HD.count = st.log.length + (HD.sending ? 1 : 0);
+  box.innerHTML = html;
+  sc.scrollTop = atBottom || grew ? sc.scrollHeight : prev;
+}
+
+async function herderSend() {
+  const i = $('herderInput');
+  const text = i.value.trim();
+  if (!text || HD.sending) return;
+  HD.sending = true;
+  i.value = '';
+  HD.state = HD.state || { log: [] };
+  HD.state.log = [...HD.state.log, { role: 'you', text }];
+  renderHerderLog();
+  try { HD.state = await api('/api/herder/chat', { text }); HD.rev = HD.state.rev; }
+  catch (e) { HD.state.log = [...HD.state.log, { role: 'note', text: e.message }]; }
+  HD.sending = false;
+  renderHerderLog();
+  i.focus();
+}
+
+// ---------------------------------------------------------------- answering an agent
+// Shows the agent's screen (read from its cmux tab, refreshed every second) with quick keys and a reply box.
+async function openReply(key, title) {
+  closeAll();
+  UI.reply = { key, title, text: '' };
+  $('replyTitle').textContent = title || 'Agent';
+  $('replyScreen').textContent = 'Reading the screen…';
+  $('replyScrim').hidden = false;
+  await refreshReply(true);
+  $('replyInput').value = '';
+  $('replyInput').focus();
+}
+async function refreshReply(first) {
+  const r = UI.reply;
+  if (!r || $('replyScrim').hidden) return;
+  try {
+    const { text } = await api(`/api/screen?key=${encodeURIComponent(r.key)}&lines=60`);
+    if (text !== r.text) {
+      const pre = $('replyScreen');
+      const atBottom = first || pre.scrollHeight - pre.scrollTop - pre.clientHeight < 30;
+      pre.textContent = text || '(empty screen)';
+      r.text = text;
+      if (atBottom) pre.scrollTop = pre.scrollHeight;
+    }
+  } catch (e) { $('replyScreen').textContent = e.message; }
+  clearTimeout(r.timer);
+  r.timer = setTimeout(refreshReply, 1000);
+}
+async function sendReply(body) {
+  if (!UI.reply) return;
+  try {
+    await api('/api/send', { key: UI.reply.key, ...body });
+    setTimeout(refreshReply, 250);
+  } catch (e) { toast(e.message, true); }
+}
+
 async function focusAgent(key) {
   try {
     const r = await api('/api/focus', { key });
@@ -237,7 +380,7 @@ function postsOf(prs) {
   const byTs = new Map();
   for (const p of prs) {
     const key = p.ts || p.url;
-    if (!byTs.has(key)) byTs.set(key, { ts: key, prs: [], postedAt: p.postedAt, yours: p.yours, poster: p.poster, author: p.author, reviewers: p.reviewers, replies: p.replies, link: p.link });
+    if (!byTs.has(key)) byTs.set(key, { ts: key, prs: [], postedAt: p.postedAt, yours: p.yours, poster: p.poster, author: p.author, reviewers: p.reviewers, replies: p.replies, link: p.link, asked: p.asked || [], changes: !!p.changes, forYou: !!p.forYou, github: p.link === p.url });
     byTs.get(key).prs.push(p);
   }
   return [...byTs.values()].filter((post) => post.prs.some(isActive)).sort((a, b) => b.postedAt - a.postedAt);
@@ -258,16 +401,17 @@ function postItem(post) {
   const list = multi ? `<div class="pr-list">${prs.map((p) => `<a class="pr-item ${p.status}" href="${esc(p.url)}" target="_blank" rel="noopener" title="${esc(`${p.title} · ${ciWord[p.ci] || 'no checks'}`)}">
       <span class="ci ${p.status === 'open' ? p.ci || '' : ''}"></span><span class="repo">${esc(p.repo)} #${p.number}</span>${mark[p.status] ? `<span class="done">${mark[p.status]}</span>` : p.draft ? '<span class="done">draft</span>' : ''}</a>`).join('')}</div>` : '';
   let foot = '';
-  if (reviewing || (post.replies && post.link)) {
+  if (reviewing || (post.replies && post.link) || post.asked.length) {
     const first = reviewing ? Math.min(...post.reviewers.map((r) => r.since)) : 0;
-    const rv = reviewing ? `<span class="pr-rv"><span class="ico">👀</span><span class="names">${esc(post.reviewers.map((r) => r.name).join(', '))} · since ${esc(clock(first))}</span></span>` : '<span></span>';
-    const bubble = post.replies && post.link ? `<a class="pr-replies" href="${esc(post.link)}" target="_blank" rel="noopener" title="Open the thread in Slack">💬 ${post.replies}</a>` : '';
+    const rv = reviewing ? `<span class="pr-rv"><span class="ico">${post.changes ? '✎' : '👀'}</span><span class="names">${esc(post.reviewers.map((r) => r.name).join(', '))} · ${post.changes ? 'changes requested' : `since ${esc(clock(first))}`}</span></span>`
+      : post.asked.length ? `<span class="pr-rv asked"><span class="ico">⏳</span><span class="names">asked: ${esc((post.forYou ? ['you', ...post.asked] : post.asked).join(', '))}</span></span>` : '<span></span>';
+    const bubble = post.replies && post.link ? `<a class="pr-replies" href="${esc(post.link)}" target="_blank" rel="noopener" title="${post.github ? 'Open the conversation on GitHub' : 'Open the thread in Slack'}">💬 ${post.replies}</a>` : '';
     foot = `<div class="pr-foot">${rv}${bubble}</div>`;
   }
   // one PR: the card opens it on GitHub; several: the card opens the Slack post, each line opens its PR
   const main = multi ? post.link || prs[0].url : prs[0].url;
   const tip = multi ? `${prs.length} PRs · open the post in Slack` : `${prs[0].repo} #${prs[0].number} · ${ciWord[prs[0].ci] || 'no checks'} · open on GitHub`;
-  return `<div class="pr ${reviewing ? 'reviewing' : ''}">
+  return `<div class="pr ${reviewing ? 'reviewing' : ''} ${post.forYou ? 'foryou' : ''}">
     <a class="pr-main" href="${esc(main)}" target="_blank" rel="noopener" title="${esc(tip)}"></a>
     <div class="pr-top"><span class="ci ${ci}"></span><span class="who">${esc(who)}</span>${multi ? `<span class="npr">${active.length === prs.length ? `${prs.length} PRs` : `${active.length} of ${prs.length} PRs open`}</span>` : ''}<span class="ago">${agoMs(post.postedAt)}</span></div>
     <div class="pr-title">${esc(title)}</div>${list}${foot}</div>`;
@@ -277,28 +421,34 @@ function renderPrs() {
   const show = S.settings.board.showPrs;
   $('prside').style.display = show ? '' : 'none';
   if (!show) return;
-  const sl = S.slack;
-  $('prChannel').textContent = sl.channel ? `#${sl.channel}` : 'PR reviews';
+  const sl = S.reviews;
+  const gh = sl.source === 'github';
+  $('prChannel').textContent = sl.label;
+  $('prChannel').title = gh ? `Open pull requests in ${sl.where} on GitHub` : '';
+  $('prFilter').querySelector('[data-f="you"]').hidden = !gh;
   const box = $('prs');
-  if (!sl.connected || !sl.channel) {
+  if (!sl.ready) {
     $('prCount').textContent = '0';
-    box.innerHTML = `<div class="side-empty">${sl.connected ? 'Pick the Slack channel where your team posts pull requests.' : 'See who is reviewing which pull request, straight from your team’s Slack channel.'}
-      <button class="btn solid" data-act="settings" data-pane="slack">${sl.connected ? 'Pick a channel…' : 'Connect Slack…'}</button></div>`;
+    box.innerHTML = gh
+      ? `<div class="side-empty">Pick the repositories whose pull requests you want to see.<button class="btn solid" data-act="settings" data-pane="github">${S.github.connected ? 'Pick repositories…' : 'Connect GitHub…'}</button></div>`
+      : `<div class="side-empty">${sl.connected ? 'Pick the Slack channel where your team posts pull requests.' : 'See who is reviewing which pull request, from your team’s Slack channel or straight from GitHub.'}
+      <button class="btn solid" data-act="settings" data-pane="slack">${sl.connected ? 'Pick a channel…' : 'Connect Slack…'}</button>${sl.connected ? '' : '<button class="btn" data-act="review-github">Use GitHub instead</button>'}</div>`;
     return;
   }
   const posts = postsOf(sl.prs);
-  const filters = { all: () => true, open: (post) => !post.reviewers.length, yours: (post) => post.yours };
+  const filters = { all: () => true, open: (post) => !post.reviewers.length, yours: (post) => post.yours, you: (post) => post.prs.some((p) => p.forYou) };
+  if (!gh && UI.prFilter === 'you') UI.prFilter = 'all';
   const sum = (list) => list.reduce((n, post) => n + openPrs(post), 0);
   for (const b of $('prFilter').querySelectorAll('button')) {
     b.classList.toggle('on', b.dataset.f === UI.prFilter);
     b.querySelector('span').textContent = sum(posts.filter(filters[b.dataset.f]));
   }
   $('prCount').textContent = sum(posts);
-  $('prCount').title = `${sum(posts)} open PRs in ${posts.length} posts`;
+  $('prCount').title = gh ? `${sum(posts)} open PRs` : `${sum(posts)} open PRs in ${posts.length} posts`;
   const list = posts.filter(filters[UI.prFilter] || filters.all);
   let html = '';
   if (sl.error) html += `<div class="sec" style="color:#F7A2A5;font-weight:500;letter-spacing:0">${esc(sl.error)}</div>`;
-  html += list.length ? list.map(postItem).join('') : `<div class="side-empty">${sl.at ? 'Nothing here.' : '<span><span class="spin"></span> Reading the channel…</span>'}</div>`;
+  html += list.length ? list.map(postItem).join('') : `<div class="side-empty">${sl.at ? 'Nothing here.' : `<span><span class="spin"></span> ${gh ? 'Reading pull requests…' : 'Reading the channel…'}</span>`}</div>`;
   const top = box.scrollTop;
   box.innerHTML = html;
   box.scrollTop = top;
@@ -415,8 +565,8 @@ function renderStats() {
     ${table('Longest waits', r.longest, [['Agent', (x) => `${x.ticket ? ticketHtml(x.ticket) + ' ' : ''}${esc(x.title || x.repo || kindName(x.kind))}`], ['Waited', (x) => hrs(x.wait), 'n'], ['When', (x) => esc(clock(x.at)), 'n when']])}
   </div>`;
   if (r.away) html += `<div class="st-note">Not counted as answers: ${r.away} time${r.away === 1 ? '' : 's'} an agent waited longer than ${S.settings.idleMinutes} min (you were away).</div>`;
-  if (S.slack.connected || p.posted) {
-    html += `<div class="st-sec"><div class="st-h">PR reviews${S.slack.channel ? ` · #${esc(S.slack.channel)}` : ''}</div>`;
+  if (S.reviews.ready || p.posted) {
+    html += `<div class="st-sec"><div class="st-h">PR reviews${S.reviews.where ? ` · ${esc(S.reviews.where)}` : ''}</div>`;
     if (!p.posted) html += '<div class="st-note">No pull requests posted in this period yet.</div>';
     else html += `<div class="tiles">
       ${tile('Posted', String(p.posted), p.yours ? `${p.yours} yours` : '')}
@@ -442,21 +592,22 @@ function renderToday() {
   const box = $('today');
   const t = S.today;
   if (!t || !S.settings.board.showToday) { box.hidden = true; return; }
-  const slack = S.slack.connected && S.slack.channel;
+  const slack = S.reviews.ready;
+  const gh = S.reviews.source === 'github';
   const cell = (prio, value, ctx, label, tip) => `<div class="tt" data-p="${prio}" ${tip ? `data-tip="${esc(tip)}"` : ''}><div class="tv"><b>${value}</b>${ctx ? `<span>${ctx}</span>` : ''}</div><div class="tl">${label}</div></div>`;
   const r = t.reviews.today;
   const cells = [];
   if (slack) {
-    cells.push(cell(1, t.prs.today, esc(`${delta(t.prs.today, t.prs.yesterday)}${t.prs.week ? ` · ${t.prs.week} this week` : ''}`), 'Your PRs', 'PRs you posted in the review channel today'));
-    cells.push(r ? cell(1, r.total, esc(`${r.eyes} 👀 · ${r.approved} ✅`), 'Reviews given', 'Teammates’ PRs you reacted to today with 👀 or ✅')
-      : cell(1, '—', 'who are you?', 'Reviews given', 'Pick yourself in Settings › Slack to count your reviews'));
+    cells.push(cell(1, t.prs.today, esc(`${delta(t.prs.today, t.prs.yesterday)}${t.prs.week ? ` · ${t.prs.week} this week` : ''}`), 'Your PRs', gh ? 'PRs you opened today (or marked ready for review)' : 'PRs you posted in the review channel today'));
+    cells.push(r ? cell(1, r.total, esc(gh ? `${r.approved} approved` : `${r.eyes} 👀 · ${r.approved} ✅`), 'Reviews given', gh ? 'Teammates’ PRs you reviewed on GitHub today' : 'Teammates’ PRs you reacted to today with 👀 or ✅')
+      : cell(1, '—', 'who are you?', 'Reviews given', gh ? 'Connect GitHub to count your reviews' : 'Pick yourself in Settings › Slack to count your reviews'));
   }
   cells.push(cell(2, t.reply.median == null ? '—' : hrs(t.reply.median), t.reply.median == null ? (t.reply.count ? `${t.reply.count} of 3 answers` : 'no answers yet') : `median · ${t.reply.count} answers`, 'Your reply time', 'How long agents waited before you answered them today (median)'));
   cells.push(cell(3, hrs(t.waited.today), esc(delta(t.waited.today, t.waited.yesterday, hrs)), 'Agents waited', 'Total time agents spent waiting on you today'));
   cells.push(cell(2, hrs(t.agent.today), esc(delta(t.agent.today, t.agent.yesterday, hrs)), 'Agent hours', 'Time your agents spent working today'));
   if (slack) {
     cells.push(cell(2, `${t.streak} day${t.streak === 1 ? '' : 's'}`, 'with a PR', 'Streak', 'Workdays in a row you posted at least one PR (weekends don’t break it)'));
-    cells.push(cell(4, t.team.today, esc(`in #${S.slack.channel}`), 'Team PRs today', 'PRs posted in the review channel today, by everyone'));
+    cells.push(cell(4, t.team.today, esc(`in ${S.reviews.where}`), 'Team PRs today', gh ? 'PRs opened today in your repositories, by everyone' : 'PRs posted in the review channel today, by everyone'));
   }
   box.innerHTML = `<button class="today-in" data-act="today-open" title="Open today’s statistics">${cells.join('')}</button>`;
   box.hidden = false;
@@ -479,9 +630,9 @@ function renderLeaderboard() {
   for (const b of $('lbDays').querySelectorAll('button')) b.classList.toggle('on', Number(b.dataset.days) === UI.lbDays);
   const body = $('lbBody');
   const d = UI.lb;
-  if (!S.slack.connected || !S.slack.channel) {
-    body.innerHTML = `<div class="st-empty"><div class="pic">🏆</div><b>Leaderboards come from your team’s review channel.</b><div>Connect Slack and pick the channel where your team posts PRs.</div>
-      <button class="btn solid" data-act="settings" data-pane="slack">Connect Slack…</button></div>`;
+  if (!S.reviews.ready) {
+    body.innerHTML = `<div class="st-empty"><div class="pic">🏆</div><b>Leaderboards come from your team’s pull requests.</b><div>Connect Slack and pick your review channel, or connect GitHub and pick your repositories.</div>
+      <span style="display:flex;gap:8px"><button class="btn solid" data-act="settings" data-pane="slack">Connect Slack…</button><button class="btn solid" data-act="settings" data-pane="github">Connect GitHub…</button></span></div>`;
     return;
   }
   if (UI.lbErr) { body.innerHTML = `<div class="banner">${esc(UI.lbErr)}</div>`; return; }
@@ -490,16 +641,19 @@ function renderLeaderboard() {
   const mine = d.boards.filter((b) => b.you).map((b) => `<b>${medal(b.you.rank)}</b> in ${LB_TITLES[b.key][3]}`);
   let html = d.me
     ? `<div class="lb-you">${mine.length ? `You: ${mine.join(' · ')}` : 'You’re not on the boards yet for this period. Post or review a PR to get on.'}</div>`
-    : '<div class="lb-you">Pick yourself in <a href="#" data-act="settings" data-pane="slack">Settings › Slack</a> to see where you rank.</div>';
+    : `<div class="lb-you">${S.reviews.source === 'github' ? 'Connect GitHub' : 'Pick yourself in <a href="#" data-act="settings" data-pane="slack">Settings › Slack</a>'} to see where you rank.</div>`;
   html += '<div class="lb-grid">';
   for (const b of d.boards) {
-    const [title, sub, fmt] = LB_TITLES[b.key];
+    const [title, sub0, fmt] = LB_TITLES[b.key];
+    const sub = S.reviews.source === 'github' ? { reviewed: 'reviews on a teammate’s PR', posted: 'opened in your repositories', approved: 'approving reviews', pickup: 'median time from PR opened to first review' }[b.key] : sub0;
     const row = (r) => `<div class="lb-row ${r.you ? 'you' : ''}"><span class="lb-rank">${medal(r.rank)}</span><span class="lb-name">${esc(r.name)}${r.you ? ' <em>you</em>' : ''}</span><span class="lb-val">${esc(fmt(r.value))}</span></div>`;
     const rows = b.rows.map(row).join('');
     const extra = b.you && !b.rows.some((r) => r.you) ? `<div class="lb-gap">…</div>${row(b.you)}` : '';
     html += `<div class="lb-card"><div class="lb-h"><b>${title}</b><span>${sub}</span></div>${rows || `<div class="st-note" style="padding:8px 0">${b.key === 'pickup' ? 'Fills in as Sheepdog sees new reviews start (each person needs 2 over 7 or 30 days).' : 'No one yet.'}</div>`}${extra}</div>`;
   }
-  html += `</div><div class="st-note">From #${esc(S.slack.channel)}. Slack doesn’t record when a reaction was added: times count from when Sheepdog first saw it, and reactions found when Sheepdog wasn’t watching are left out of pickup speed. Pickup speed counts once per post. Everyone’s Sheepdog sees the same channel, so everyone sees the same boards.</div>`;
+  html += `</div><div class="st-note">${S.reviews.source === 'github'
+    ? `From ${esc(S.reviews.where)} on GitHub. Review times are exact (GitHub records when each review was submitted); pickup is the time from opening a PR (or marking it ready) to its first review.`
+    : `From ${esc(S.reviews.where)}. Slack doesn’t record when a reaction was added: times count from when Sheepdog first saw it, and reactions found when Sheepdog wasn’t watching are left out of pickup speed. Pickup speed counts once per post. Everyone’s Sheepdog sees the same channel, so everyone sees the same boards.`}</div>`;
   body.innerHTML = html;
 }
 
@@ -588,11 +742,45 @@ function paneAlerts() {
     ])}`;
 }
 
+const HK = { provider: null, models: null, modelsErr: '', loading: false };
+function loadHerderModels() {
+  if (HK.loading || !cfg.herder.key.set) return;
+  HK.loading = true;
+  api('/api/herder/models').then((m) => { HK.models = m; HK.modelsErr = ''; }, (e) => { HK.models = []; HK.modelsErr = e.message; })
+    .finally(() => { HK.loading = false; if (UI.pane === 'herder') renderSettings(); });
+}
+function paneHerder() {
+  const h = cfg.herder;
+  const prov = HK.provider || h.provider;
+  const connected = h.key.set && prov === h.provider;
+  if (connected && !HK.models && !HK.loading) loadHerderModels();
+  const models = HK.models?.length ? HK.models : [h.model];
+  const seg = `<div class="seg" style="width:320px">${[['anthropic', 'Anthropic'], ['openai', 'OpenAI-compatible']].map(([k, l]) => `<button class="${prov === k ? 'on' : ''}" data-act="herder-prov" data-p="${k}">${l}</button>`).join('')}</div>`;
+  const conn = prov === 'openai'
+    ? [row('Base URL', 'Your LiteLLM gateway, OpenRouter (https://openrouter.ai/api/v1), Ollama (http://localhost:11434/v1) or OpenAI (https://api.openai.com/v1)',
+        `<input class="field wide mono" id="herderBase" placeholder="https://your-gateway/v1" value="${esc(h.provider === 'openai' ? h.baseUrl : '')}" autocomplete="off">`),
+       row('API key', connected ? `Saved (${esc(h.key.hint)}). Stored on this Mac only.` : 'The gateway or provider key. Stored on this Mac only.',
+        `<input class="field" id="herderKey" type="password" placeholder="${connected ? '••••••• saved' : 'key'}" autocomplete="off"><button class="btn solid" data-act="herder-key">${connected ? 'Update' : 'Connect'}</button>${connected ? '<button class="btn" data-act="herder-key-clear">Remove</button>' : ''}`)]
+    : [row('Anthropic API key', connected ? `Saved (${esc(h.key.hint)}). Stored on this Mac only.` : 'From console.anthropic.com › API keys. Stored on this Mac only.',
+        `<input class="field" id="herderKey" type="password" placeholder="${connected ? '••••••• saved' : 'sk-ant-…'}" autocomplete="off"><button class="btn solid" data-act="herder-key">${connected ? 'Replace' : 'Save'}</button>${connected ? '<button class="btn" data-act="herder-key-clear">Remove</button>' : ''}`)];
+  if (connected) conn.push(row('Model', HK.modelsErr ? esc(HK.modelsErr) : HK.loading && !HK.models ? 'Loading the list…' : prov === 'openai' ? 'The models your endpoint offers' : 'Used for questions and summaries',
+    `<select class="field" data-set="herder.model">${[...new Set(models)].map((m) => `<option value="${esc(m)}" ${m === h.model ? 'selected' : ''}>${esc(m)}</option>`).join('')}</select>`));
+  return `<div class="pane-head">Herder</div>
+    <div class="note">Herder shows the agents waiting for you and what they’re asking, and you can chat with it about your agents (“what did RV-123 conclude?”, “which agents are stuck?”) or have it message them. Without a model, lines that start with a ticket (RV-123 run the tests) go straight to that agent.</div>
+    ${group('Model', [row('Provider', 'Anthropic directly, or any OpenAI-compatible endpoint: a LiteLLM gateway, OpenRouter, Ollama or OpenAI', seg), ...conn])}
+    ${group('Safety', [
+      row('Confirm messages to agents', 'Off: when you tell Herder to send something, it sends it right away. On: you see each message first and press Send.', toggle('herder.confirmSends')),
+      row('Show the panel when an agent waits', 'Herder opens with the agents on “Your turn”, and only those', toggle('board.herder')),
+    ])}
+    <div class="note">Herder only runs when you write to it. To answer, it sends the end of the agents’ chats you ask about, and the list of agents and PRs, to your model provider with your key. Text in agents’ chats is treated as information, never as instructions.</div>`;
+}
+
 function paneBoard() {
   return `<div class="pane-head">Board</div>
     ${group('Layout', [
       row('Density', 'Compact hides the prompt and the machine line', select('board.density', [['auto', 'Automatic (compact above 10 agents)'], ['comfortable', 'Comfortable'], ['compact', 'Compact']])),
-      row('PR review sidebar', 'From your Slack review channel; hidden below 640px', toggle('board.showPrs')),
+      row('PR review sidebar', 'Hidden below 640px', toggle('board.showPrs')),
+      row('Review sidebar source', 'Slack: posts in your review channel, 👀 and ✅. GitHub: open PRs in your repositories and their reviews (no Slack needed). Automatic uses Slack once a channel is picked.', select('reviews.source', [['auto', 'Automatic'], ['slack', 'Slack channel'], ['github', 'GitHub']])),
       row('Today strip', 'Your PRs, reviews given, reply time, agent hours and streak at the top', toggle('board.showToday')),
     ])}`;
 }
@@ -844,7 +1032,7 @@ function slSuggestHtml() {
 // ---------------------------------------------------------------- settings window
 const PANES = [
   ['access', 'Access', '🔑'], ['pastures', 'Machines', '🐑'], ['alerts', 'Alerts', '🔔'], ['board', 'Board', '▦'], ['slack', 'Slack', '#'],
-  ['github', 'GitHub', '⎇'], ['tickets', 'Tickets', '⌗'], ['terminal', 'Terminal', '>_'], ['advanced', 'Advanced', '⚙︎'],
+  ['github', 'GitHub', '⎇'], ['herder', 'Herder', '>☰'], ['tickets', 'Tickets', '⌗'], ['terminal', 'Terminal', '>_'], ['advanced', 'Advanced', '⚙︎'],
 ];
 function renderSettings() {
   const dot = (id) => {
@@ -854,8 +1042,8 @@ function renderSettings() {
     return '';
   };
   const body = {
-    access: paneAccess, pastures: panePastures, alerts: paneAlerts, board: paneBoard, tickets: paneTickets, terminal: paneTerminal, advanced: paneAdvanced,
-    github: () => `<div class="pane-head">GitHub</div><div class="note">Used for the Branches view and for the live state of pull requests in the sidebar.</div>${githubBody(false)}`,
+    access: paneAccess, herder: paneHerder, pastures: panePastures, alerts: paneAlerts, board: paneBoard, tickets: paneTickets, terminal: paneTerminal, advanced: paneAdvanced,
+    github: () => `<div class="pane-head">GitHub</div><div class="note">Used for the Branches view, the live state of pull requests in the sidebar, and (with GitHub as the review source in Settings › Board) the sidebar itself: open PRs in these repositories.</div>${githubBody(false)}`,
     slack: () => `<div class="pane-head">Slack</div><div class="note">The PR review sidebar reads one Slack channel. 👀 means someone is reviewing; ✅ approved PRs drop off.</div>${slackBody(false)}`,
   }[UI.pane]();
   $('prefs').innerHTML = `<nav><div class="navt">SHEEPDOG SETTINGS</div>${PANES.map(([id, name, g]) =>
@@ -897,7 +1085,7 @@ function wizardHtml() {
   } else if (step === 'mac') {
     const d = WZ.detect;
     const local = d?.local;
-    body = `<div style="display:flex;gap:12px;align-items:center"><span style="font-size:32px">🐶</span><div><div class="wiz-h">Sniffing this computer…</div><div class="wiz-p">Looking for Claude Code, Codex, Gemini CLI and Antigravity in your terminals.</div></div></div>
+    body = `<div style="display:flex;gap:12px;align-items:center"><img src="/icon.svg" alt="" width="40" height="40"><div><div class="wiz-h">Sniffing this computer…</div><div class="wiz-p">Looking for Claude Code, Codex, Gemini CLI and Antigravity in your terminals.</div></div></div>
       ${!d ? '<div class="note"><span class="spin"></span> Looking…</div>' : group('', [
         `<div class="found"><span class="${local.ok ? 'tick' : 'err'}">${local.ok ? '✓' : '✕'}</span><div class="lbl"><div>${local.ok ? esc(local.summary[0].toUpperCase() + local.summary.slice(1)) : 'Could not run the probe'}</div><div class="sub ${local.ok ? '' : 'err'}">${local.ok ? esc(local.host) : esc(local.error)}</div></div>${local.ok && local.agents ? '<span>🐑</span>' : ''}</div>`,
         `<div class="found"><span class="tick">✓</span><div class="lbl"><div>Terminals</div><div class="sub">${[d.terminals.cmux && 'cmux', d.terminals.iterm && 'iTerm2'].filter(Boolean).join(', ') || 'No supported terminal found; cards still work, without jump-to-tab'}</div></div></div>`,
@@ -918,7 +1106,7 @@ function wizardHtml() {
   } else if (step === 'terminal') {
     if (!TERM.installed && WZ.detect) { TERM.installed = WZ.detect.terminals; TERM.cmuxMode = WZ.detect.cmux; }
     if (!ACCESS.data && !ACCESS.busy) loadAccess();
-    body = `<div><div class="wiz-h">Give Sheepdog access</div><div class="wiz-p">A few things need your permission: notifications, switching to an agent’s terminal tab, and the machines you picked. Each button opens the right setting. Sheepdog only reads tab titles and selects tabs; it never types into or reads your sessions.</div></div>
+    body = `<div><div class="wiz-h">Give Sheepdog access</div><div class="wiz-p">A few things need your permission: notifications, switching to an agent’s terminal tab, and the machines you picked. Each button opens the right setting. Sheepdog reads tab titles and selects tabs. It reads a tab’s screen or types into it only when you press ↩ Answer on an agent.</div></div>
       ${accessHtml(true)}
       <div class="note">You can come back to this any time in Settings › Access.</div>`;
   } else if (step === 'github') {
@@ -994,7 +1182,7 @@ function rerender() {
     if (keep && $(keep.id)) { const el = $(keep.id); el.value = keep.v; el.focus(); }
   }
 }
-function closeAll() { for (const id of ['branchesScrim', 'statsScrim', 'lbScrim', 'tabScrim', 'settingsScrim', 'wizardScrim']) $(id).hidden = true; $('tip').hidden = true; }
+function closeAll() { for (const id of ['branchesScrim', 'statsScrim', 'lbScrim', 'tabScrim', 'replyScrim', 'settingsScrim', 'wizardScrim']) $(id).hidden = true; $('tip').hidden = true; }
 
 // ---------------------------------------------------------------- actions
 const actions = {
@@ -1040,6 +1228,31 @@ const actions = {
     if (el.dataset.ok !== '1' || e?.altKey) { openTabPicker(el.dataset.key, el.dataset.title || ''); return; }
     focusAgent(el.dataset.key);
   },
+  reply: (el) => openReply(el.dataset.key, el.dataset.title),
+  'herder-toggle': () => { HD.open = $('herder').hidden; HD.closedFor = HD.open ? '' : turnSig(); renderHerder(); if (HD.open) $('herderInput').focus(); },
+  'herder-close': () => { HD.open = false; HD.closedFor = turnSig(); renderHerder(); },
+  'herder-send': () => herderSend(),
+  'herder-reset': async () => { try { HD.state = await api('/api/herder/reset', {}); HD.rev = HD.state.rev; renderHerderLog(); } catch (e) { toast(e.message, true); } },
+  'herder-confirm': async (el) => { try { HD.state = await api('/api/herder/confirm', { id: el.dataset.id, ok: el.dataset.ok === '1' }); HD.rev = HD.state.rev; renderHerderLog(); } catch (e) { toast(e.message, true); } },
+  tchip: (el) => (el.dataset.reply === '1' ? openReply(el.dataset.key, el.dataset.title) : focusAgent(el.dataset.key)),
+  'hd-open': (el) => focusAgent(el.dataset.key),
+  'herder-prov': (el) => { HK.provider = el.dataset.p; renderSettings(); },
+  'herder-key': async () => {
+    const provider = HK.provider || cfg.herder.provider;
+    const key = $('herderKey').value.trim();
+    const baseUrl = $('herderBase')?.value.trim() || '';
+    if (!key && provider !== 'openai') return;
+    try {
+      const r = await api('/api/herder/key', { key, provider, baseUrl });
+      HK.models = r.models; HK.provider = null; HD.rev = -1;
+      await loadConfig(); renderSettings(); toast(`Connected. Herder uses ${r.model}`);
+    } catch (e) { toast(e.message, true); }
+  },
+  'herder-key-clear': async () => { await api('/api/herder/key/clear', {}); HK.models = null; HD.rev = -1; await loadConfig(); renderSettings(); toast('Key removed'); },
+  'review-github': async () => { await setConfig({ 'reviews.source': 'github' }); if (!S.github.connected || !S.reviews.ready) openSettings('github'); poll(true); },
+  'reply-key': (el) => sendReply(el.dataset.text != null ? { text: el.dataset.text, enter: false } : { press: el.dataset.press }),
+  'reply-send': () => { const i = $('replyInput'); sendReply({ text: i.value }); i.value = ''; i.focus(); },
+  'reply-open': () => { const k = UI.reply?.key; closeAll(); if (k) focusAgent(k); },
   'tab-pick': async (el) => {
     try {
       const r = await api('/api/focus/link', { key: UI.tabKey, id: el.dataset.id });
@@ -1298,8 +1511,9 @@ document.addEventListener('focusin', (e) => {
 document.addEventListener('keydown', (e) => {
   if ((e.metaKey || e.ctrlKey) && e.key === ',') { e.preventDefault(); openSettings(); }
   if (e.key === 'Escape' && $('wizardScrim').hidden) closeAll();
+  if (e.key === 'Enter' && !e.shiftKey && e.target.id === 'herderInput') { e.preventDefault(); herderSend(); return; }
   if (e.key === 'Enter' && e.target.tagName === 'INPUT') {
-    const map = { ghToken: 'gh-token', ghRepo: 'gh-repo-add', slToken: 'sl-token', newHost: 'host-add', wzHost: 'wz-host-add', ghBranches: 'gh-branches', cmuxPw: 'cmux-pw' };
+    const map = { ghToken: 'gh-token', ghRepo: 'gh-repo-add', slToken: 'sl-token', newHost: 'host-add', wzHost: 'wz-host-add', ghBranches: 'gh-branches', cmuxPw: 'cmux-pw', replyInput: 'reply-send', herderKey: 'herder-key', herderBase: 'herder-key' };
     const act = map[e.target.id];
     if (act) { e.preventDefault(); actions[act]({ dataset: {} }); }
   }
@@ -1315,6 +1529,7 @@ async function poll(once) {
     renderBoard();
     renderPrs();
     renderToday();
+    renderHerder();
     prAlerts(S.events);
     if (!$('lbScrim').hidden && Date.now() - UI.lbAt > 60e3) loadLeaderboard(true);
     if (!$('branchesScrim').hidden) renderBranches();

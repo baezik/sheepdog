@@ -52,7 +52,7 @@ async function request(pathOrUrl, { method = 'GET', body, tok } = {}) {
   return { data, headers: res.headers };
 }
 
-async function graphql(query, variables = {}, tok) {
+export async function graphql(query, variables = {}, tok) {
   const { data } = await request('/graphql', { method: 'POST', body: { query, variables }, tok });
   if (data.errors?.length && !data.data) throw new Error(`GitHub: ${data.errors[0].message}`);
   return data.data;
@@ -165,7 +165,7 @@ export function setRepos(list) {
 }
 
 // ---------------------------------------------------------------- polling
-const norm = (s) => {
+export const norm = (s) => {
   if (!s) return null;
   s = s.toUpperCase();
   if (s === 'SUCCESS') return 'ok';

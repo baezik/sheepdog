@@ -17,7 +17,7 @@
 import os from 'node:os';
 import path from 'node:path';
 import { existsSync } from 'node:fs';
-import { getConfig, updateConfig, getState, saveStateSoon } from './config.mjs';
+import { getConfig, updateConfig, getState, saveStateSoon, reviewSource } from './config.mjs';
 import { prDetails, github } from './github.mjs';
 import { recordPr } from './history.mjs';
 import { linksIn } from './tickets.mjs';
@@ -45,7 +45,7 @@ export const slack = { ok: false, at: 0, prs: [], error: null, ticketLinks: [] }
 // teammate's PR has waited too long for a reviewer. Newest last; the page shows the ones it hasn't seen.
 export const prEvents = [];
 let lastEventId = 0;
-function prEvent(kind, title, body, url) {
+export function prEvent(kind, title, body, url) {
   const id = Math.max(Date.now(), lastEventId + 1);
   lastEventId = id;
   prEvents.push({ id, kind, title, body, url });
@@ -239,6 +239,7 @@ function postLink(s, ts) {
 }
 
 export async function refreshSlack() {
+  if (reviewSource() !== 'slack') return; // GitHub feeds the sidebar instead
   const s = getConfig().slack;
   if (!s.token || !s.channelId) { Object.assign(slack, { ok: false, prs: [], error: s.token ? 'Pick a review channel' : null }); return; }
   try {

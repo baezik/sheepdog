@@ -2,7 +2,7 @@
 
 Watches Claude Code, Codex, Gemini CLI and Antigravity CLI (`agy`) on your computer and your other machines, and tells you the moment one is waiting for you. Amber is reserved for "your turn".
 
-- **Board**: one card per agent: your turn (amber, sorted first), working (green), idle (grey, after 30 min unanswered). Cards show the ticket, title, last prompt, machine, context % and tokens. Click a card to jump to its terminal tab (cmux or iTerm2).
+- **Board**: one card per agent: your turn (amber, sorted first), working (green), idle (grey, after 30 min unanswered). Cards show the ticket, title, last prompt, machine and tokens. Click a card to jump to its terminal tab (cmux or iTerm2).
 - **PR sidebar**: one card per post in the Slack channel you pick (usually one ticket). A post with several PRs lists them, each with its checks and ✓ when approved or merged; the card leaves once all are done. Counts are of open PRs. With several PRs in one post, each PR's own GitHub approval decides when it's done. Newest post first, refreshed every 10 seconds. 👀 = someone is reviewing. PRs leave once approved (✅ in Slack or approved on GitHub), merged or closed.
 - **Branches**: last merge per repository on the branches you track (e.g. dev / staging / main), with CI and deploy status.
 - **Today strip**: your PRs (vs yesterday, this week), reviews given, your reply time, agents waited, agent hours, your workday streak and the team's PRs today. Click it for today's stats.
@@ -21,7 +21,7 @@ Free and open source (MIT).
 
 Needs macOS 13 or later on an Apple silicon Mac.
 
-**Updates:** Sheepdog updates itself. When a new version is out, the 🐶 gets a dot and the menu shows **Update to Sheepdog x.y.z…**; **Check for Updates…** checks right away. Your settings are kept.
+**Updates:** Sheepdog updates itself. When a new version is out, the menu bar icon gets a dot and the menu shows **Update to Sheepdog x.y.z…**; **Check for Updates…** checks right away. Your settings are kept.
 
 ## Build the Mac app
 
@@ -31,7 +31,7 @@ cd macos && ./build.sh      # → macos/build/Sheepdog.app, Sheepdog-<version>.d
 
 Needs Xcode or the Command Line Tools (Swift 5.9+) and Node 20+ (the Node you build with is bundled into the app). The first build downloads [Sparkle](https://sparkle-project.org) (the updater, MIT) into `macos/vendor/` and checks its checksum.
 
-A menu bar app (Swift/AppKit, macOS 13+) that carries its own Node runtime and the server/UI, so users install nothing else. The 🐶 shows an amber count when agents wait, `ᶻ` when nothing needs you, a red `⧗n` when a machine is overloaded, and barks when a new agent turns amber. The dropdown lists agents grouped as Your turn / Working / Idle (click one to jump to its tab), plus Open Board ⌘B, Settings…, Run Setup Again…, Open at Login and Quit. The board, settings and setup wizard open in a native window; notifications are native, with a Jump to Tab action.
+A menu bar app (Swift/AppKit, macOS 13+) that carries its own Node runtime and the server/UI, so users install nothing else. The menu bar icon shows an amber count when agents wait, `ᶻ` when nothing needs you, a red `⧗n` when a machine is overloaded, and barks when a new agent turns amber. The dropdown lists agents grouped as Your turn / Working / Idle (click one to jump to its tab), plus Open Board ⌘B, Settings…, Run Setup Again…, Open at Login and Quit. The board, settings and setup wizard open in a native window; notifications are native, with a Jump to Tab action.
 
 Builds are ad-hoc signed for now: the first time, right-click Sheepdog › Open (or System Settings › Privacy & Security › Open Anyway). For public downloads, build with `SIGN_ID="Developer ID Application: …"`, then notarize and staple the DMG (`xcrun notarytool submit … --wait`, `xcrun stapler staple`). The bundle is Apple-silicon only until a universal Node runtime is bundled. Server log: `~/Library/Logs/Sheepdog/server.log`.
 
@@ -72,6 +72,12 @@ The first run opens the setup wizard: detect agents here → pick SSH machines �
 2. *Personal access token*: `repo` + `read:org` (classic), or a fine-grained token with read access to contents, pull requests, deployments and commit statuses.
 3. *Sign in with GitHub*: OAuth device flow. Needs an OAuth app with Device Flow enabled; set its client ID in Settings › GitHub or ship it with `SHEEPDOG_GITHUB_CLIENT_ID`.
 
+**Review sidebar source**: the sidebar comes from a Slack review channel (below) or straight from GitHub (Settings › Board › Review sidebar source). With **GitHub**, no Slack is needed: it lists the open pull requests in the repositories picked in Settings › GitHub, who is reviewing (from submitted reviews), who has been asked, and drops PRs once approved. A **For you** filter shows PRs where you're asked to review, and you get an alert when that happens. GitHub records when each review was submitted, so review times in Stats and Leaderboards are exact. *Automatic* (the default) uses Slack once a channel is picked, otherwise GitHub.
+
+**Herder** (the panel on the right): opens by itself when an agent is on "Your turn" and lists only those agents, with what each is asking, quick keys and a reply box. Below them is a chat: type `RV-123 run the tests` to message that agent, or, with a model connected in Settings › Herder (an Anthropic API key, or any OpenAI-compatible endpoint such as a LiteLLM gateway, OpenRouter, Ollama or OpenAI; it uses the Responses API, falling back to Chat Completions), ask anything about your agents ("what did RV-123 conclude?", "which agents are stuck?") and have Herder message them for you. It runs only when you write to it; messages it wants to send wait for you to press Send (switchable); and it treats agents' screens as information, never as instructions. Requests go from your Mac straight to your provider with your key.
+
+**Answering agents** (cmux): ↩ Answer on an agent card shows a live view of its tab with quick keys (1/2/3, arrows, Enter, Esc, ⇧⇥) and a reply box, so you can answer without switching tabs. It works for agents on other machines and inside tmux too, since it reads and types into the cmux tab itself. Sheepdog only reads a tab's screen or types into it when you use Answer.
+
 **Slack**, two ways:
 1. *Team bot (recommended for teams):* one person clicks *Create the Sheepdog bot* in Settings › Slack (a bot-only app: no user permissions), installs it, types `/invite @Sheepdog` in the review channel, and shares the *Bot User OAuth Token* (`xoxb-`) with the team through a password manager. Everyone pastes it, picks the channel, and picks themselves from the channel's members. The bot reads messages and reactions only in channels it's invited to; like any workspace member it can also see channel names and the member directory (no emails). Disconnecting never revokes a shared bot token.
 2. *Personal app:* create the app from the personal manifest and paste its *User OAuth Token* (`xoxp-`). It reads with your own access (every channel you're in), so prefer the bot. Disconnecting, or switching to a bot token, revokes the personal token in Slack.
@@ -93,7 +99,7 @@ bin/sheepdog.mjs      start + open browser
 server/index.mjs      HTTP server, routes, poll loops
 server/config.mjs     settings file, validation, redaction
 server/hosts.mjs      local + SSH probing, ~/.ssh/config, Codex terminal mapping
-server/probe.py       runs on each machine; lists agents, context, tokens, load
+server/probe.py       runs on each machine; lists agents, tokens, load
 server/terminal.mjs   cmux / iTerm2 tab mapping and focus
 server/github.mjs     auth (gh / token / device flow), repos, branches, PR state
 server/slack.mjs      auth, channel picker, PR sidebar from reactions, PR alerts
@@ -107,8 +113,7 @@ test/                 node:test, no network
 
 - Slack doesn't record *when* a reaction was added, so "reviewing since" is when Sheepdog first saw the 👀. The same goes for review times in Stats.
 - Stats count time only while Sheepdog runs (one sample a minute).
-- Claude logs don't record the context window size: 200k is assumed unless the session has gone past it (then 1M). Override with `CLAUDE_CONTEXT_WINDOW`.
-- Gemini CLI doesn't log a tool call until it has finished, or anything while it thinks: Sheepdog counts it as working while its log was just written or the process is busy, so a pause can briefly look like your turn. Context assumes a 1M window (`GEMINI_CONTEXT_WINDOW`).
+- Gemini CLI doesn't log a tool call until it has finished, or anything while it thinks: Sheepdog counts it as working while its log was just written or the process is busy, so a pause can briefly look like your turn.
 - Antigravity CLI (`agy`): state and title come from its conversation summaries; token counts aren't shown (agy stores them in a binary format).
 - "⧗ queue" is the 1-minute load average minus the CPU count.
 - macOS-first: jump-to-tab needs macOS; the board and probes also work on Linux.
